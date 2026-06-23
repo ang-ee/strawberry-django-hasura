@@ -1,0 +1,96 @@
+[project]
+name            = "strawberry-django-hasura"
+version         = "0.1.0"
+description     = "Expose Django models over GraphQL in the Hasura convention — the stock @refinedev/hasura refine data provider drives Strawberry/Django, composing strawberry-django + strawberry-django-aggregates (aggregates for free)."
+readme          = "README.md"
+requires-python = ">=3.14"
+license         = { text = "AGPL-3.0-or-later" }
+authors         = [{ name = "strawberry-django-hasura maintainers" }]
+keywords        = [
+  "django", "strawberry", "graphql", "hasura",
+  "refine", "crud", "aggregate", "data-provider",
+]
+classifiers     = [
+  "Development Status :: 4 - Beta",
+  "Framework :: Django",
+  "Framework :: Django :: 6.0",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Database",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Software Development :: Libraries :: Application Frameworks",
+  "Typing :: Typed",
+]
+
+dependencies = [
+  "django>=6.0",
+  "strawberry-graphql>=0.315.0",
+  "strawberry-graphql-django>=0.82.0",
+  "strawberry-django-aggregates>=0.6.0",
+]
+
+[project.urls]
+Homepage      = "https://github.com/ang-ee/strawberry-django-hasura"
+Documentation = "https://github.com/ang-ee/strawberry-django-hasura/blob/main/CONTRACT.md"
+Issues        = "https://github.com/ang-ee/strawberry-django-hasura/issues"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-django>=4",
+  "ruff>=0.6",
+  "mypy>=1.10",
+  "django-stubs>=5",
+]
+
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["strawberry_django_hasura*"]
+exclude = ["tests*", "examples*"]
+
+[tool.setuptools.package-data]
+strawberry_django_hasura = ["py.typed"]
+
+[tool.ruff]
+line-length    = 79
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+# Django is configured programmatically in tests/conftest.py.
+python_files = ["test_*.py"]
+testpaths    = ["tests"]
+addopts      = "-ra --strict-markers"
+pythonpath   = ["."]
+
+[tool.mypy]
+# The package ships ``py.typed`` / ``Typing :: Typed``; back that claim with a
+# checked ORM boundary. The django-stubs plugin resolves model/QuerySet types
+# (reading ``tests.settings``); the strict-ish flags below catch untyped defs
+# and ``Any`` leaking out of the queryset seam.
+plugins                = ["mypy_django_plugin.main"]
+warn_return_any        = true
+warn_redundant_casts   = true
+warn_unused_ignores    = true
+disallow_untyped_defs  = true
+disallow_incomplete_defs = true
+check_untyped_defs     = true
+no_implicit_optional   = true
+
+[tool.django-stubs]
+django_settings_module = "tests.settings"
+
+[[tool.mypy.overrides]]
+# strawberry-django-aggregates 0.6.x ships no py.typed marker, so mypy
+# cannot analyze it. Treat its imports as untyped until it ships one.
+module                 = "strawberry_django_aggregates.*"
+ignore_missing_imports = true

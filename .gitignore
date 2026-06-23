@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+.venv/
+.env
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+# Node scratch for the examples/ refine-client proof
+node_modules/
