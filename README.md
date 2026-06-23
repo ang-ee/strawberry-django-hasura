@@ -57,124 +57,101 @@ const dp = dataProvider(client, {
 
 ## Quickstart (backend)
 
-Declare the per-resource Hasura inputs from your Strawberry type, then compose
-the adapter's helpers in plain resolvers. (Condensed from
-[`tests/demo_schema.py`](./tests/demo_schema.py) /
-[`examples/demo_schema.py`](./examples/demo_schema.py), which exercise every
-surface — including the opaque-`id` (sqid) boundary.)
+Define your Strawberry type and an authorized-write backend, then call
+`hasura_resource(...)` once — it assembles the *whole* Hasura surface (inputs,
+the `notes` / `notes_aggregate` / `notes_by_pk` queries, the
+`insert`/`update`/`delete`-by-pk mutations, and the free `<Model>Aggregate`) and
+pins the snake_case wire names itself. (Condensed from
+[`tests/demo_schema.py`](./tests/demo_schema.py), which exercises every surface
+— including the opaque-`id` (sqid) boundary.)
 
 ```python
 import strawberry, strawberry_django
-from django.db import models, transaction
-from strawberry import UNSET, auto
+from strawberry import auto
 
-from strawberry_django_hasura import (
-    OrderBy, apply_ordering, build_aggregate_type, hasura_config, input_to_dict,
-    make_aggregate_container, make_aggregate_resolver, paginate, where_to_q,
-)
-from strawberry_django_hasura.comparisons import (
-    IDComparison, IntComparison, StringComparison,
-)
+from strawberry_django_hasura import hasura_resource
 from .models import Note  # your Django model
 
 
 @strawberry_django.type(Note)
 class NoteType:           # GraphQL type name `Note`
-    id: auto
     title: auto
     word_count: auto
     status: auto
 
-
-@strawberry.input(name="notes_bool_exp")
-class NoteBoolExp:
-    id: IDComparison | None = UNSET
-    title: StringComparison | None = UNSET
-    word_count: IntComparison | None = UNSET
-    status: StringComparison | None = UNSET
-    and_: list["NoteBoolExp"] | None = strawberry.field(name="_and", default=UNSET)
-    or_: list["NoteBoolExp"] | None = strawberry.field(name="_or", default=UNSET)
-    not_: "NoteBoolExp | None" = strawberry.field(name="_not", default=UNSET)
+    @strawberry.field
+    def id(self) -> strawberry.ID:   # public id (e.g. a sqid)
+        return strawberry.ID(encode_sqid(self.pk))
 
 
-@strawberry.input(name="notes_order_by")
-class NoteOrderBy:                 # per-field input of the `order_by` enum
-    title: OrderBy | None = UNSET
-    word_count: OrderBy | None = UNSET
-
-
-@strawberry.input(name="notes_pk_columns_input")
-class NotePkColumns:
-    id: str                        # String (not ID) — matches idType: "String"
-
-
-def base_qs():
-    # Apply your row-level (e.g. REBAC) scoping here — reads run on this.
+def get_queryset(info):
+    # Apply your row-level (e.g. REBAC) scoping here — reads + the aggregate
+    # run on this; the builder applies the Hasura `where` on top.
     return Note.objects.all()
 
 
-def filtered(info, where):
-    return base_qs().filter(where_to_q(where))
+class NoteWriteBackend:               # the authorized-write seam (a Protocol)
+    def create(self, info, data):     # insert_notes_one(object:)
+        return Note.objects.create(**data)
+    def update(self, info, pk, data): # update_notes_by_pk(pk_columns:, _set:)
+        obj = Note.objects.get(pk=decode_sqid(pk))
+        for k, v in data.items(): setattr(obj, k, v)
+        obj.save(update_fields=[*data]); return obj
+    def delete(self, info, pk):       # delete_notes_by_pk(id:)
+        obj = Note.objects.filter(pk=decode_sqid(pk)).first()
+        if obj: obj.delete()
+        return obj
 
 
-# The free aggregate — the native <Model>Aggregate, wired into the container.
-NoteAggregate = build_aggregate_type(Note, name="Note",
-                                     aggregate_fields=["word_count"])
-aggregate_resolver = make_aggregate_resolver(NoteAggregate)
-NoteAggregateContainer = make_aggregate_container(
-    "notes_aggregate", NoteType, NoteAggregate,
-    filtered_queryset=filtered, aggregate_resolver=aggregate_resolver,
+resource = hasura_resource(
+    NoteType,
+    model=Note,
+    name="notes",
+    filterable=["id", "title", "word_count", "status"],
+    sortable=["title", "word_count"],
+    aggregatable=["word_count"],
+    get_queryset=get_queryset,
+    write_backend=NoteWriteBackend(),
+    id_decode=decode_sqid,            # omit for a raw-pk project
 )
 
-
-@strawberry.type
-class Query:
-    @strawberry.field(name="notes")
-    def notes(self, info: strawberry.Info, where: NoteBoolExp | None = None,
-              order_by: list[NoteOrderBy] | None = None,
-              limit: int | None = None, offset: int | None = None) -> list[NoteType]:
-        qs = apply_ordering(filtered(info, where), order_by)
-        return list(paginate(qs, limit, offset))
-
-    @strawberry.field(name="notes_aggregate")
-    def notes_aggregate(self, where: NoteBoolExp | None = None) -> NoteAggregateContainer:
-        return NoteAggregateContainer(where=where)
-
-    @strawberry.field(name="notes_by_pk")
-    def notes_by_pk(self, id: str) -> NoteType | None:   # String to match idType
-        return base_qs().filter(pk=id).first()
-
-
-schema = strawberry.Schema(query=Query, config=hasura_config())
+schema = strawberry.Schema(
+    query=resource.query, mutation=resource.mutation, types=resource.types,
+)
 ```
 
-`insert_notes_one` / `update_notes_by_pk` / `delete_notes_by_pk` follow the same
-pattern, using `input_to_dict` to translate the Hasura `object:` / `_set:`
-envelope into model kwargs. Your `<resource>_set_input` is the authoritative
-writable-field allowlist (keep server-owned columns out of it); run the
-`update_by_pk` read-modify-write inside `transaction.atomic()` and
-`save(update_fields=…)` so a patch touches only the columns it set — see
-[`tests/demo_schema.py`](./tests/demo_schema.py).
+`hasura_resource` derives the comparison / order scalar of each column from the
+**Django field**, and the `insert` / `_set` writable columns from the model's
+editable, non-pk, non-auto fields. Because it pins each wire name itself, the
+resource is correct on a stock *camelCase* schema (e.g. an Angee schema) with no
+schema-wide converter — `hasura_config()` (below) stays an optional convenience
+for a schema dedicated to a single dialect.
+
+### The primitives (custom assembly)
+
+`hasura_resource` composes the five surface primitives, which remain public for
+a resource that needs custom shaping (a non-derivable input, a bespoke
+resolver): `where_to_q` / `apply_ordering` / `paginate` /
+`build_aggregate_type` + `make_aggregate_resolver` + `make_aggregate_container`
+/ `input_to_dict`, the `*Comparison` inputs, the `OrderBy` enum, and
+`hasura_config()`. Wire them in plain resolvers (as the builder does) when you
+step off the one-call path.
 
 ### Opaque ids (sqid)
 
 If your public `id` is an opaque sqid (not the raw pk), keep the output
-`id: ID!` field encoded, type every **pk-arg** as `String` (matching
-`idType: "String"`), and pass an `id_decode` hook so `where: { id: { _eq } }`
-decodes before the lookup:
-
-```python
-qs = base_qs().filter(where_to_q(where, id_decode=decode_sqid))
-# ...and decode at notes_by_pk / pk_columns: objects.get(pk=decode_sqid(id))
-```
-
-The encode/decode stays your concern — the adapter never inspects a value to
-guess whether it is a sqid.
+`id: ID!` field encoded, and pass `id_decode` to `hasura_resource` — the builder
+decodes `where: { id: { _eq } }` and `notes_by_pk` / `pk_columns.id` before the
+lookup, and the pk-arg surface is typed GraphQL `String` (matching
+`idType: "String"`). The encode/decode and the per-write decode (in your
+`write_backend`) stay your concern — the adapter never inspects a value to guess
+whether it is a sqid.
 
 ## The surfaces
 
 | Surface | Module | What it emits / does |
 | --- | --- | --- |
+| **Resource builder** | `resource` | `hasura_resource(...)` — assembles the whole surface in one call, snake-naming baked in |
 | Filtering | `comparisons`, `filtering` | `<resource>_bool_exp` operator objects → a Django `Q` |
 | Ordering | `ordering` | `[<resource>_order_by!]` + the `order_by` enum → `.order_by()` |
 | Pagination | `connection` | bare `limit` / `offset` → a queryset slice |

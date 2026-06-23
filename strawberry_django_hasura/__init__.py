@@ -21,14 +21,18 @@ from .filtering import comparison_to_q, where_to_q
 from .mutations import input_to_dict
 from .naming import SnakeNameConverter, hasura_config
 from .ordering import OrderBy, apply_ordering, order_clauses
+from .resource import HasuraResource, WriteBackend, hasura_resource
 
 __all__ = [
+    "HasuraResource",
     "OrderBy",
     "SnakeNameConverter",
+    "WriteBackend",
     "apply_ordering",
     "build_aggregate_type",
     "comparison_to_q",
     "hasura_config",
+    "hasura_resource",
     "input_to_dict",
     "make_aggregate_container",
     "make_aggregate_resolver",

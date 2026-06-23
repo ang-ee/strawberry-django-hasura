@@ -31,6 +31,23 @@ model-independent wire-naming flag). `connection.py` also owns the
 the list total rides `aggregate.count`). `__init__.py` re-exports the public API
 — **that export list is the contract; keep it stable.**
 
+`resource.py` is the one-call **builder** on top of the surfaces:
+`hasura_resource(node, *, model, name, filterable, sortable, aggregatable,
+get_queryset, write_backend, id_decode)` assembles the whole resource (the
+inputs, the query/mutation roots, and the free aggregate) by composing the
+primitives above — it owns only *composition + naming*. It derives the
+comparison/order scalar of each column from the **Django field** and the
+`insert`/`_set` writable columns from the model's editable, non-pk, non-auto
+fields; row scoping (`get_queryset`), authorized writes (`write_backend`, a
+`Protocol`), and the sqid⇄pk boundary (`id_decode`) stay caller-supplied (no
+rebac/Angee imports leak in). Crucially it **pins the snake_case wire names
+itself** — per root field, argument, generated input field, and
+`<Model>Aggregate` field name — so the resource is correct on a stock
+*camelCase* consuming schema (e.g. Angee) with no schema-wide `hasura_config()`.
+The generated `<res>_bool_exp` references itself (`_and`/`_or`/`_not`), so the
+generated types are hosted in a per-resource synthetic module for forward-ref
+resolution at schema build.
+
 ## The aggregate is FREE — wire, don't reshape
 
 This is the headline of the Hasura dialect. The native `<Model>Aggregate` type

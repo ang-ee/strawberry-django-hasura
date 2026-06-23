@@ -5,6 +5,24 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`hasura_resource(...)`** — a one-call declarative builder that assembles the
+  *whole* Hasura surface for a model (the `<res>` list, `<res>_aggregate`,
+  `<res>_by_pk`, the `insert`/`update`/`delete`-by-pk mutations, and the
+  `<res>_bool_exp` / `<res>_order_by` / `<res>_insert_input` / `<res>_set_input`
+  / `<res>_pk_columns_input` inputs + the free `<Model>Aggregate`) by composing
+  the existing primitives. It **pins the snake_case wire names itself** — per
+  root field, argument, generated input field, and `<Model>Aggregate` field name
+  — so the resource is correct on a stock *camelCase* schema without a
+  schema-wide `hasura_config()` (which `hasura_config()` stays an optional
+  convenience for). Exposes `HasuraResource` (the assembled `query` / `mutation`
+  / `types` bundle) and the `WriteBackend` protocol (the caller's
+  authorized-write seam) (`resource.py`). The toy `tests/demo_schema.py` now
+  builds its resource in this one call.
+
 ## [0.1.0] — 2026-06-23
 
 Initial release. A thin adapter that emits the GraphQL shape the stock
