@@ -28,9 +28,11 @@ from strawberry import UNSET
 # lookup. ``_nilike`` / ``_nlike`` negate their positive twin. The
 # Postgres-only ``_iregex`` / ``_similar`` / ``_nsimilar`` operators (refine
 # sends them for startswith/endswith CrudOps) are intentionally absent here:
-# ``_iregex`` maps to Django ``__iregex`` (works on Postgres/MySQL, not
-# SQLite); ``_similar`` has no ORM lookup. Add them to a project's map only on
-# a backend that supports them — keep this map portable.
+# ``_iregex`` maps to Django ``__iregex`` and ``_similar`` to ``SIMILAR TO`` —
+# neither is portable across backends. Add them to a project's map only on a
+# backend that supports them — keep this map portable. A comparison that sets
+# an operator absent from this map raises in ``comparison_to_q`` (it is never
+# silently dropped — see there).
 _LOOKUPS: dict[str, tuple[str, bool]] = {
     "eq": ("", False),
     "neq": ("", True),
@@ -44,7 +46,6 @@ _LOOKUPS: dict[str, tuple[str, bool]] = {
     "nlike": ("__contains", True),
     "ilike": ("__icontains", False),
     "nilike": ("__icontains", True),
-    "iregex": ("__iregex", False),
 }
 
 _AND = "and_"
@@ -64,6 +65,12 @@ def comparison_to_q(
     ``decode`` (when given) rewrites each operand before the lookup — the sqid
     boundary for the ``id`` column. It is applied per-element for the list
     operators (``_in`` / ``_nin``).
+
+    An operator the SDL accepts but ``_LOOKUPS`` does not map (the
+    Postgres-only ``_iregex`` / ``_similar`` / ``_nsimilar`` on a backend that
+    has not registered them) raises ``ValueError`` rather than being silently
+    dropped: on a permission-naive read a silently-ignored filter would
+    *widen* the result set. A project enables one by adding it to ``_LOOKUPS``.
     """
     q = Q()
     for attr, (suffix, negate) in _LOOKUPS.items():
@@ -82,6 +89,17 @@ def comparison_to_q(
     if is_null is not UNSET and is_null is not None:
         clause = Q(**{f"{field}__isnull": True})
         q &= clause if is_null else ~clause
+    for f in dataclasses.fields(cmp):
+        if f.name in _LOOKUPS or f.name == "is_null":
+            continue
+        val = getattr(cmp, f.name, UNSET)
+        if val is UNSET or val is None:
+            continue
+        raise ValueError(
+            f"filter operator {f.name!r} on field {field!r} is accepted in "
+            "the SDL but not mapped for this backend; register it in a "
+            "project-supplied filtering._LOOKUPS or omit it"
+        )
     return q
 
 

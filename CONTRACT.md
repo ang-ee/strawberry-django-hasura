@@ -47,6 +47,13 @@ refine's `hasuraFilterOperatorMappings` sends `eq→_eq`, `ne→_neq`,
 Maps to Django `Q`: `_eq→exact`, `_neq→~exact`, `_in→in`, `_nin→~in`,
 `_like→contains`, `_ilike→icontains`, `_gt→gt`, …, `_is_null:true→isnull`.
 
+The portable operators are mapped in the default `filtering._LOOKUPS`; the
+Postgres-only `_iregex`/`_similar`/`_nsimilar` are accepted in the SDL but
+**not** in the portable default map. Sending one on a backend that has not
+registered it **raises** (it is never silently dropped — a silently-ignored
+filter would widen a permission-naive read). A Postgres project registers the
+lookup in its own `_LOOKUPS`.
+
 ## order_by — `notes_order_by`
 
 - `input notes_order_by { <field>: order_by }` — a per-field input of the
@@ -84,3 +91,9 @@ Maps to Django `Q`: `_eq→exact`, `_neq→~exact`, `_in→in`, `_nin→~in`,
 - Resource name → the list/aggregate/by-pk field stems and the
   insert/update/delete mutation names above are all keyed off the **plural**
   resource (`notes`, `notes_aggregate`, `insert_notes_one`, …).
+- **Empty boolean operands** (`_or: []`, `_not: {}`) follow Django `Q` algebra
+  — an empty expression is a no-op (matches every row in the already-scoped
+  queryset), not Hasura's "matches none". The stock provider never emits these;
+  a hand-written `meta.gqlQuery` that relies on the empty-operand edge should
+  not assume Hasura semantics. Row scoping remains the consumer's `base_qs()`
+  concern regardless (this library is permission-naive).

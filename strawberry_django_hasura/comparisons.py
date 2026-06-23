@@ -16,9 +16,11 @@ The operator names mirror refine's ``hasuraFilterOperatorMappings``:
 operators the provider can send for some refine ``CrudOperator``\\ s —
 ``_nilike``/``_nlike`` (``ncontains`` /``ncontainss``), ``_iregex``
 (``startswith``/``endswith``), ``_similar`` (``startswiths``/``endswiths``) —
-are included on ``String_comparison_exp`` so the SDL accepts them;
-``filtering`` maps the portable ones and documents the Postgres-only
-regex/similar lookups (see ``filtering._LOOKUPS``).
+are included on ``String_comparison_exp`` so the SDL accepts them. The
+portable ones are mapped in ``filtering._LOOKUPS``; the Postgres-only
+regex/similar lookups stay project-supplied, and sending one a backend has not
+registered raises rather than being silently dropped (see
+``filtering.comparison_to_q``).
 """
 
 from __future__ import annotations
