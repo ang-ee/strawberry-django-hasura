@@ -330,21 +330,21 @@ wheels = [
 
 [[package]]
 name = "strawberry-django-aggregates"
-version = "0.6.1"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "django" },
     { name = "strawberry-graphql" },
     { name = "strawberry-graphql-django" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e4/e9/5ece840108031c7d6d0823c298a41731c4cf204900c1b867c25e527774c5/strawberry_django_aggregates-0.6.1.tar.gz", hash = "sha256:c1e05826f2c1dbef191594c423f7e3271e74e300b29e2a8bd954debe0d828c9c", size = 149204, upload-time = "2026-06-23T10:34:51.161Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5e/e7/d4a6402856f78b01a903f8fe3032767d241f77aa5622d6eeb41a88c6ebe8/strawberry_django_aggregates-0.7.0.tar.gz", hash = "sha256:8db6f3b95674699efc698d1ad421d4aeee793b32b3f0ef17a6146860f513738d", size = 151690, upload-time = "2026-06-24T07:44:40.536Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a8/aa/ec747fec6dc5e8fa4e6a60f153bc79351dcf54283e4af8a6e9f4404d6de3/strawberry_django_aggregates-0.6.1-py3-none-any.whl", hash = "sha256:533a42fd0f39b58037f23bdd99653d41b6e8f3bee065e8f6fadba73e0dd073d6", size = 100691, upload-time = "2026-06-23T10:34:49.956Z" },
+    { url = "https://files.pythonhosted.org/packages/77/49/29df5f9c29f12ee992829eecef76216c92c85948c6eca4101c7d57d0ad0c/strawberry_django_aggregates-0.7.0-py3-none-any.whl", hash = "sha256:ff1bbf7b28940f0d2fc16490a05355aac0412481fa35b6bb056b530508870360", size = 101655, upload-time = "2026-06-24T07:44:39.583Z" },
 ]
 
 [[package]]
 name = "strawberry-django-hasura"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "django" },
@@ -365,7 +365,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "django", specifier = ">=6.0" },
-    { name = "strawberry-django-aggregates", specifier = ">=0.6.0" },
+    { name = "strawberry-django-aggregates", specifier = ">=0.7.0" },
     { name = "strawberry-graphql", specifier = ">=0.315.0" },
     { name = "strawberry-graphql-django", specifier = ">=0.82.0" },
 ]

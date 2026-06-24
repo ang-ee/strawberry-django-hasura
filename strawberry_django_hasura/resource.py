@@ -37,7 +37,7 @@ import decimal
 import sys
 import types
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -46,18 +46,21 @@ from django.db.models import Model, QuerySet
 from strawberry import UNSET
 from strawberry.types import get_object_definition
 from strawberry_django.fields.types import field_type_map
+from strawberry_django_aggregates import AggregateBuilder
 
-from .aggregation import build_aggregate_type, make_aggregate_resolver
+from .aggregation import make_aggregate_resolver
 from .comparisons import (
     BooleanComparison,
     DateTimeComparison,
     FloatComparison,
     IDComparison,
     IntComparison,
+    JSONComparison,
     StringComparison,
 )
 from .connection import make_aggregate_container, paginate
 from .filtering import where_to_q
+from .grouping import make_groups_field
 from .mutations import input_to_dict
 from .ordering import OrderBy, apply_ordering
 
@@ -83,6 +86,7 @@ _COMPARISON_FOR_TYPE: dict[Any, type] = {
     datetime.date: DateTimeComparison,
     datetime.time: DateTimeComparison,
     strawberry.ID: IDComparison,
+    strawberry.scalars.JSON: JSONComparison,
 }
 
 #: The fixed refine ``idType`` wire field name. refine derives the id variable
@@ -126,7 +130,10 @@ class HasuraResource:
     types: list[type]
 
 
-def _pin_snake_wire_names(strawberry_type: type) -> None:
+def _pin_snake_wire_names(
+    strawberry_type: type,
+    seen: set[int] | None = None,
+) -> None:
     """Pin each field's GraphQL wire name to its snake_case python name.
 
     Walks the type (and its nested object types — the ``<Model>Aggregate``'s
@@ -141,6 +148,11 @@ def _pin_snake_wire_names(strawberry_type: type) -> None:
     definition = get_object_definition(strawberry_type)
     if definition is None:
         return
+    seen = seen or set()
+    marker = id(definition)
+    if marker in seen:
+        return
+    seen.add(marker)
     for field in definition.fields:
         if field.graphql_name is None and "_" in field.python_name:
             field.graphql_name = field.python_name
@@ -152,7 +164,7 @@ def _pin_snake_wire_names(strawberry_type: type) -> None:
             inner = inner.of_type
         nested = get_object_definition(inner)
         if nested is not None and nested is not definition:
-            _pin_snake_wire_names(cast("type", inner))
+            _pin_snake_wire_names(cast("type", inner), seen)
 
 
 def _host_module(name: str) -> types.ModuleType:
@@ -214,6 +226,8 @@ def _column_python_type(field: Any) -> Any:
     owner does not map raises rather than silently degrading to ``str`` (the
     library's fail-fast stance — see ``filtering.comparison_to_q``).
     """
+    if getattr(field, "many_to_one", False):
+        return _column_python_type(field.target_field)
     for klass in type(field).__mro__:
         if klass in field_type_map:
             return field_type_map[klass]
@@ -224,13 +238,17 @@ def _column_python_type(field: Any) -> Any:
     )
 
 
-def _comparison_for(field: Any) -> type:
+def _comparison_for(
+    field: Any,
+    *,
+    public_id: bool = False,
+) -> type:
     """The ``*_comparison_exp`` input for a scalar Django field.
 
     The column's python type comes from the owner; this maps that scalar onto
     the adapter's own Hasura comparison vocabulary.
     """
-    python = _column_python_type(field)
+    python = strawberry.ID if public_id else _column_python_type(field)
     comparison = _COMPARISON_FOR_TYPE.get(python)
     if comparison is None:
         raise TypeError(
@@ -240,30 +258,93 @@ def _comparison_for(field: Any) -> type:
     return comparison
 
 
-def _writable_fields(model: type[Model], id_column: str) -> list[Any]:
-    """The editable, non-pk, non-auto concrete columns (insert / ``_set``).
+def _writable_fields(
+    model: type[Model],
+    id_column: str,
+    writable: list[str] | None = None,
+) -> list[Any]:
+    """The editable, non-pk, non-auto fields (insert / ``_set``).
 
-    The writable-column allowlist is a fact of the Django model: a column is
-    settable from the client when it is concrete, editable, not the primary
-    key, not the public ``id`` column, and not an ``auto_now``/``auto_now_add``
-    stamp. The server owns those it excludes.
+    The writable allowlist is a fact of the Django model. Concrete columns are
+    settable from the client when editable, not the primary key, not the public
+    ``id`` column, and not an ``auto_now``/``auto_now_add`` stamp. Many-to-many
+    relation arrays are settable too: they are not columns, but Django's native
+    mutation resolver owns applying those relation lists after the row exists.
+    The server owns fields excluded here. A caller may pass an explicit
+    ``writable`` list to mirror Hasura permissions; invalid names fail fast
+    instead of being silently skipped.
     """
     out: list[Any] = []
-    for field in model._meta.get_fields():
-        if not getattr(field, "concrete", False):
-            continue
-        if getattr(field, "primary_key", False):
-            continue
-        if field.name == id_column:
-            continue
-        if not getattr(field, "editable", False):
-            continue
-        if getattr(field, "auto_now", False) or getattr(
-            field, "auto_now_add", False
-        ):
+    fields = (
+        [model._meta.get_field(name) for name in writable]
+        if writable is not None
+        else model._meta.get_fields()
+    )
+    for field in fields:
+        reason = _not_writable_reason(field, id_column)
+        if reason is not None:
+            if writable is not None:
+                raise TypeError(
+                    f"field {field.name!r} cannot be exposed as a Hasura "
+                    f"writable column: {reason}"
+                )
             continue
         out.append(field)
     return out
+
+
+def _not_writable_reason(field: Any, id_column: str) -> str | None:
+    if getattr(field, "many_to_many", False):
+        return None
+    if not getattr(field, "concrete", False):
+        return "it is not a concrete column"
+    if getattr(field, "primary_key", False):
+        return "it is the primary key"
+    if field.name == id_column:
+        return "it is the public id column"
+    if not getattr(field, "editable", False):
+        return "it is not editable"
+    if getattr(field, "auto_now", False) or getattr(
+        field, "auto_now_add", False
+    ):
+        return "it is an automatic timestamp"
+    return None
+
+
+def _writable_python_type(
+    field: Any,
+    *,
+    public_id: bool = False,
+) -> Any:
+    """Return the GraphQL input type for one writable model column."""
+
+    if getattr(field, "many_to_many", False):
+        item_type = (
+            strawberry.ID
+            if public_id
+            else _column_python_type(field.target_field)
+        )
+        return types.GenericAlias(list, (item_type,))
+    return strawberry.ID if public_id else _column_python_type(field)
+
+
+def _enabled_operations(
+    *,
+    insert: bool,
+    update: bool,
+    delete: bool,
+) -> tuple[str, ...]:
+    """Return enabled mutation operation names in stable Hasura order."""
+
+    return tuple(
+        name
+        for name, enabled in (
+            ("insert", insert),
+            ("update", update),
+            ("delete", delete),
+        )
+        if enabled
+    )
 
 
 def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per facet
@@ -274,7 +355,19 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     filterable: list[str],
     sortable: list[str],
     aggregatable: list[str],
+    groupable: list[str] | None = None,
+    max_groups: int | None = None,
+    writable: list[str] | None = None,
+    insertable: list[str] | None = None,
+    updatable: list[str] | None = None,
+    insert: bool = True,
+    update: bool = True,
+    delete: bool = True,
+    field_id_decode: Mapping[str, Callable[[Any], Any]] | None = None,
     get_queryset: Callable[[strawberry.Info], QuerySet[Any]],
+    get_aggregate_queryset: (
+        Callable[[strawberry.Info], QuerySet[Any]] | None
+    ) = None,
     write_backend: WriteBackend,
     id_decode: Callable[[Any], Any] | None = None,
     id_column: str = "pk",
@@ -285,12 +378,27 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     resource stem (the plural Hasura name — ``"notes"``); it defaults to the
     model's lower-cased name. ``filterable`` / ``sortable`` / ``aggregatable``
     are the column allowlists for ``<res>_bool_exp`` / ``<res>_order_by`` /
-    ``<Model>Aggregate``. ``get_queryset(info)`` returns the already row-scoped
-    base source the reads + aggregate run on (the caller applies REBAC there;
-    this builder applies the Hasura ``where`` on top). ``write_backend`` is the
-    authorized-write seam (:class:`WriteBackend`). ``id_decode`` /
-    ``id_column`` map the public ``id`` operand onto the ORM lookup for the
-    sqid boundary (defaults to a raw-pk project).
+    ``<Model>Aggregate``. ``groupable`` enables the optional NDC-shaped
+    ``<res>_groups`` companion root; ``max_groups`` caps its offset page (a
+    high-cardinality dimension would otherwise pull every group — default
+    ``None`` is uncapped; pass ``order_by`` for stable pages). ``writable``
+    mirrors Hasura field
+    permissions for insert / ``_set`` inputs (default: editable concrete model
+    columns plus editable many-to-many relation arrays). ``insertable`` and
+    ``updatable`` override that shared allowlist for insert and update
+    separately. ``insert`` / ``update`` / ``delete``
+    mirror Hasura table mutation operation permissions: disabling one removes
+    its root and the input types used only by that operation.
+    ``field_id_decode`` marks non-``id`` scalar fields whose Hasura operands
+    are public ids and must be decoded before the Django lookup, e.g. a
+    foreign-key column exposed as a public id.
+    ``get_queryset(info)`` returns the already row-scoped base source for
+    list/detail reads. ``get_aggregate_queryset(info)`` can override the source
+    used by aggregate math and groups when a consumer needs a different
+    queryset policy there; aggregate ``nodes`` still use ``get_queryset``.
+    ``write_backend`` is the authorized-write seam (:class:`WriteBackend`).
+    ``id_decode`` / ``id_column`` map the public ``id`` operand onto the ORM
+    lookup for the sqid boundary (defaults to a raw-pk project).
 
     Returns a :class:`HasuraResource` whose ``query`` / ``mutation`` /
     ``types`` drop into a schema bucket. Every generated wire name (roots,
@@ -299,6 +407,12 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     ``hasura_config()``.
     """
     res = name or model.__name__.lower()
+    public_id_fields = frozenset(field_id_decode or {})
+    operations = _enabled_operations(
+        insert=insert,
+        update=update,
+        delete=delete,
+    )
     # The ``<Model>Aggregate`` prefix is the node's GraphQL name (``Note``,
     # owned by the node type), not the Django class name (``NoteModel``).
     node_definition = get_object_definition(node)
@@ -319,7 +433,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         col: (
             IDComparison
             if col == _ID_WIRE_NAME
-            else _comparison_for(get_field(col))
+            else _comparison_for(
+                get_field(col),
+                public_id=col in public_id_fields,
+            )
         )
         | None
         for col in filterable
@@ -351,56 +468,137 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         defaults=dict.fromkeys(sortable, UNSET),
     )
 
-    writable = _writable_fields(model, id_column)
-    # insert: required when the model field has no default, else its default.
-    insert_ann: dict[str, Any] = {}
-    insert_defaults: dict[str, Any] = {}
-    for field in writable:
-        insert_ann[field.name] = _column_python_type(field)
-        if field.has_default():
-            insert_defaults[field.name] = field.get_default()
-    insert_input = _input_type(
-        f"{res}_insert_input",
-        insert_ann,
-        module=module,
-        defaults=insert_defaults,
+    insert_fields = _writable_fields(
+        model,
+        id_column,
+        insertable if insertable is not None else writable,
     )
-
-    set_input = _input_type(
-        f"{res}_set_input",
-        {field.name: _column_python_type(field) | None for field in writable},
-        module=module,
-        defaults={field.name: UNSET for field in writable},
+    set_fields = _writable_fields(
+        model,
+        id_column,
+        updatable if updatable is not None else writable,
     )
-
-    pk_columns_input = _input_type(
-        f"{res}_pk_columns_input",
-        {"id": str},
-        module=module,
-    )
-
-    def filtered(info: strawberry.Info, where: Any) -> QuerySet[Any]:
-        # ``get_queryset(info)`` is the caller's already row-scoped source; the
-        # resource applies the Hasura ``where`` on top. The aggregate container
-        # is handed this same composed source so its ``aggregate`` and
-        # ``nodes`` share one filtered queryset.
-        return get_queryset(info).filter(
-            where_to_q(where, id_column=id_column, id_decode=id_decode)
+    # insert: required only when the model field has no default and is not
+    # nullable. Columns with Django defaults are omitted from the resolver
+    # input and let the model apply its default; the GraphQL SDL does not
+    # mirror Python default values (especially mutable / JSON defaults).
+    insert_input: type | None = None
+    if insert:
+        insert_ann: dict[str, Any] = {}
+        insert_defaults: dict[str, Any] = {}
+        for field in insert_fields:
+            python_type = _writable_python_type(
+                field,
+                public_id=field.name in public_id_fields,
+            )
+            optional_on_insert = (
+                field.has_default()
+                or getattr(field, "null", False)
+                or getattr(field, "blank", False)
+            )
+            insert_ann[field.name] = (
+                python_type | None if optional_on_insert else python_type
+            )
+            if optional_on_insert:
+                insert_defaults[field.name] = UNSET
+        insert_input = _input_type(
+            f"{res}_insert_input",
+            insert_ann,
+            module=module,
+            defaults=insert_defaults,
         )
 
-    # --- the free aggregate: native <Model>Aggregate, zero reshape -----------
-    aggregate_type = build_aggregate_type(
-        model, name=aggregate_prefix, aggregate_fields=aggregatable
+    set_input: type | None = None
+    if update:
+        set_input = _input_type(
+            f"{res}_set_input",
+            {
+                field.name: _writable_python_type(
+                    field,
+                    public_id=field.name in public_id_fields,
+                )
+                | None
+                for field in set_fields
+            },
+            module=module,
+            defaults={field.name: UNSET for field in set_fields},
+        )
+
+    pk_columns_input: type | None = None
+    if update:
+        pk_columns_input = _input_type(
+            f"{res}_pk_columns_input",
+            {"id": str},
+            module=module,
+        )
+
+    aggregate_get_queryset = get_aggregate_queryset or get_queryset
+
+    def _filtered(
+        info: strawberry.Info,
+        where: Any,
+        source: Callable[[strawberry.Info], QuerySet[Any]],
+    ) -> QuerySet[Any]:
+        # ``source(info)`` is the caller's already row-scoped source; the
+        # resource applies the Hasura ``where`` on top.
+        return source(info).filter(
+            where_to_q(
+                where,
+                id_column=id_column,
+                id_decode=id_decode,
+                field_decoders=field_id_decode,
+            )
+        )
+
+    def filtered(info: strawberry.Info, where: Any) -> QuerySet[Any]:
+        return _filtered(info, where, get_queryset)
+
+    def filtered_aggregate(info: strawberry.Info, where: Any) -> QuerySet[Any]:
+        return _filtered(info, where, aggregate_get_queryset)
+
+    # --- the free aggregate (+ optional grouped surface) ---------------------
+    # One ``AggregateBuilder`` produces BOTH the free ``<Model>Aggregate`` and
+    # — when ``groupable`` is set — the typed ``<Model>GroupKey`` / group-by
+    # spec / having / group-order types the grouping surface composes, sharing
+    # the SAME aggregate type (never a second ``<Model>Aggregate``). The
+    # aggregate stays free: zero reshape.
+    agg_builder = AggregateBuilder(
+        model=model,
+        name_prefix=aggregate_prefix,
+        aggregate_fields=aggregatable,
+        group_by_fields=groupable or None,
     )
+    agg_built = agg_builder.build()
+    aggregate_type = cast("type", agg_built.aggregate_type)
     _pin_snake_wire_names(aggregate_type)
     aggregate_resolver = make_aggregate_resolver(aggregate_type)
     container = make_aggregate_container(
         f"{res}_aggregate",
         node,
         aggregate_type,
-        filtered_queryset=filtered,
+        filtered_queryset=filtered_aggregate,
+        filtered_nodes_queryset=filtered,
         aggregate_resolver=aggregate_resolver,
     )
+    groups_field: Any = None
+    groups_types: list[type] = []
+    if groupable:
+        groups_field, groups_types = make_groups_field(
+            builder=agg_builder,
+            built=agg_built,
+            resource_name=res,
+            filter_type=bool_exp,
+            get_queryset=aggregate_get_queryset,
+            id_decode=id_decode,
+            id_column=id_column,
+            field_decoders=field_id_decode,
+            max_groups=max_groups,
+        )
+        # Pin snake_case on the generated group types — the query walk reaches
+        # the group container + key (a return type) but not the ``having`` /
+        # ``order_by`` INPUT types (e.g. ``count_gt`` would camelCase).
+        for grouped in groups_types:
+            _pin_snake_wire_names(grouped)
 
     # --- root query fields ---------------------------------------------------
     def resolve_list(
@@ -447,75 +645,84 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         "return": node | None,
     }
 
-    query = strawberry.type(
-        type(
-            f"{res}__query",
-            (),
-            {
-                res: strawberry.field(resolver=resolve_list, name=res),
-                f"{res}_aggregate": strawberry.field(
-                    resolver=resolve_aggregate, name=f"{res}_aggregate"
-                ),
-                f"{res}_by_pk": strawberry.field(
-                    resolver=resolve_by_pk, name=f"{res}_by_pk"
-                ),
-            },
-        )
-    )
+    query_fields = {
+        res: strawberry.field(resolver=resolve_list, name=res),
+        f"{res}_aggregate": strawberry.field(
+            resolver=resolve_aggregate, name=f"{res}_aggregate"
+        ),
+        f"{res}_by_pk": strawberry.field(
+            resolver=resolve_by_pk, name=f"{res}_by_pk"
+        ),
+    }
+    if groups_field is not None:
+        query_fields[f"{res}_groups"] = groups_field
+    query = strawberry.type(type(f"{res}__query", (), query_fields))
 
     # --- root mutation fields ------------------------------------------------
-    def resolve_insert(self: Any, info: strawberry.Info, object: Any) -> Any:
-        return write_backend.create(info, input_to_dict(object))
+    mutation_fields: dict[str, Any] = {}
+    if "insert" in operations:
+        assert insert_input is not None
 
-    resolve_insert.__annotations__ = {
-        "self": Any,
-        "info": strawberry.Info,
-        "object": insert_input,
-        "return": node,
-    }
+        def resolve_insert(
+            self: Any,
+            info: strawberry.Info,
+            object: Any,
+        ) -> Any:
+            return write_backend.create(info, input_to_dict(object))
 
-    def resolve_update(
-        self: Any, info: strawberry.Info, pk_columns: Any, _set: Any
-    ) -> Any:
-        return write_backend.update(info, pk_columns.id, input_to_dict(_set))
-
-    resolve_update.__annotations__ = {
-        "self": Any,
-        "info": strawberry.Info,
-        "pk_columns": pk_columns_input,
-        "_set": set_input,
-        "return": node,
-    }
-
-    def resolve_delete(
-        self: Any, info: strawberry.Info, id: str
-    ) -> Any | None:
-        return write_backend.delete(info, id)
-
-    resolve_delete.__annotations__ = {
-        "self": Any,
-        "info": strawberry.Info,
-        "id": str,
-        "return": node | None,
-    }
-
-    mutation = strawberry.type(
-        type(
-            f"{res}__mutation",
-            (),
-            {
-                f"insert_{res}_one": strawberry.mutation(
-                    resolver=resolve_insert, name=f"insert_{res}_one"
-                ),
-                f"update_{res}_by_pk": strawberry.mutation(
-                    resolver=resolve_update, name=f"update_{res}_by_pk"
-                ),
-                f"delete_{res}_by_pk": strawberry.mutation(
-                    resolver=resolve_delete, name=f"delete_{res}_by_pk"
-                ),
-            },
+        resolve_insert.__annotations__ = {
+            "self": Any,
+            "info": strawberry.Info,
+            "object": insert_input,
+            "return": node,
+        }
+        mutation_fields[f"insert_{res}_one"] = strawberry.mutation(
+            resolver=resolve_insert,
+            name=f"insert_{res}_one",
         )
-    )
+    if "update" in operations:
+        assert pk_columns_input is not None
+        assert set_input is not None
+
+        def resolve_update(
+            self: Any, info: strawberry.Info, pk_columns: Any, _set: Any
+        ) -> Any:
+            return write_backend.update(
+                info,
+                pk_columns.id,
+                input_to_dict(_set),
+            )
+
+        resolve_update.__annotations__ = {
+            "self": Any,
+            "info": strawberry.Info,
+            "pk_columns": pk_columns_input,
+            "_set": set_input,
+            "return": node,
+        }
+        mutation_fields[f"update_{res}_by_pk"] = strawberry.mutation(
+            resolver=resolve_update,
+            name=f"update_{res}_by_pk",
+        )
+    if "delete" in operations:
+
+        def resolve_delete(
+            self: Any, info: strawberry.Info, id: str
+        ) -> Any | None:
+            return write_backend.delete(info, id)
+
+        resolve_delete.__annotations__ = {
+            "self": Any,
+            "info": strawberry.Info,
+            "id": str,
+            "return": node | None,
+        }
+        mutation_fields[f"delete_{res}_by_pk"] = strawberry.mutation(
+            resolver=resolve_delete,
+            name=f"delete_{res}_by_pk",
+        )
+
+    mutation = strawberry.type(type(f"{res}__mutation", (), mutation_fields))
 
     # Pin snake_case on the root holders' fields + arguments (``order_by`` /
     # ``pk_columns`` / ``_set`` would otherwise camelCase on a default schema).
@@ -526,12 +733,17 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         query=query,
         mutation=mutation,
         types=[
-            container,
-            aggregate_type,
-            bool_exp,
-            order_by_input,
-            insert_input,
-            set_input,
-            pk_columns_input,
+            item
+            for item in (
+                container,
+                aggregate_type,
+                bool_exp,
+                order_by_input,
+                insert_input,
+                set_input,
+                pk_columns_input,
+                *groups_types,
+            )
+            if item is not None
         ],
     )

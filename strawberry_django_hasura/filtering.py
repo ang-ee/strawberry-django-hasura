@@ -16,7 +16,7 @@ never inspects the value to guess whether it is a sqid (see ``AGENTS.md``).
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from django.db.models import Q
@@ -46,6 +46,7 @@ _LOOKUPS: dict[str, tuple[str, bool]] = {
     "nlike": ("__contains", True),
     "ilike": ("__icontains", False),
     "nilike": ("__icontains", True),
+    "contains": ("__contains", False),
 }
 
 _AND = "and_"
@@ -108,12 +109,15 @@ def where_to_q(
     *,
     id_column: str = "pk",
     id_decode: Callable[[Any], Any] | None = None,
+    field_decoders: Mapping[str, Callable[[Any], Any]] | None = None,
 ) -> Q:
     """Walk a Hasura ``<resource>_bool_exp`` instance into a Django ``Q``.
 
     ``id_column`` maps the GraphQL ``id`` field to its Django column (default
     ``pk``); ``id_decode`` decodes a sqid operand to the pk before the lookup.
-    Both default to a raw-pk project; a sqid project passes its codec.
+    ``field_decoders`` applies the same public-id boundary to any other scalar
+    field, such as a foreign-key column exposed as a public id. Both default to
+    a raw-pk project; a sqid project passes its codecs.
     """
     if where is None or where is UNSET:
         return Q()
@@ -124,18 +128,32 @@ def where_to_q(
             continue
         if f.name == _AND:
             for sub in val:
-                q &= where_to_q(sub, id_column=id_column, id_decode=id_decode)
+                q &= where_to_q(
+                    sub,
+                    id_column=id_column,
+                    id_decode=id_decode,
+                    field_decoders=field_decoders,
+                )
         elif f.name == _OR:
             any_q = Q()
             for sub in val:
                 any_q |= where_to_q(
-                    sub, id_column=id_column, id_decode=id_decode
+                    sub,
+                    id_column=id_column,
+                    id_decode=id_decode,
+                    field_decoders=field_decoders,
                 )
             q &= any_q
         elif f.name == _NOT:
-            q &= ~where_to_q(val, id_column=id_column, id_decode=id_decode)
+            q &= ~where_to_q(
+                val,
+                id_column=id_column,
+                id_decode=id_decode,
+                field_decoders=field_decoders,
+            )
         elif f.name == "id":
             q &= comparison_to_q(id_column, val, decode=id_decode)
         else:
-            q &= comparison_to_q(f.name, val)
+            decoder = (field_decoders or {}).get(f.name)
+            q &= comparison_to_q(f.name, val, decode=decoder)
     return q

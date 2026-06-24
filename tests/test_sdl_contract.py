@@ -34,6 +34,9 @@ CRUD_MARKERS = [
     "_ilike",
     "_in",
     "_is_null",
+    "input JSON_comparison_exp {",
+    "_contains",
+    "metadata: JSON_comparison_exp",
     "_and: [notes_bool_exp!]",
     "_or: [notes_bool_exp!]",
     "_not: notes_bool_exp",
@@ -59,6 +62,23 @@ AGGREGATE_MARKERS = [
     "word_count: BigInt",  # SUM over an IntegerField widens to BigInt
 ]
 
+# Grouping — NDC-preview surface (CONTRACT.md "Grouping — NDC preview"). The
+# `<res>_group` pairs the typed `<Model>GroupKey` with the FREE
+# `<Model>Aggregate` (no reshape); emitted because the demo uses `groupable`.
+GROUPING_MARKERS = [
+    "notes_groups(group_by: [NoteGroupBySpec!]!",
+    "): [notes_group!]!",
+    "type notes_group {",
+    "key: NoteGroupKey!",
+    "aggregate: NoteAggregate!",  # the SAME free aggregate — no reshape
+    "input NoteGroupBySpec {",
+    "input NoteHaving {",
+    "count_gt: Int",  # snake_case having operator (not camelCased)
+    "type NoteGroupKey {",
+    "updated_at_month_range: BucketRange",  # TIME bucket-range sibling
+    "enum NoteGroupableField {",
+]
+
 
 @pytest.mark.parametrize("marker", CRUD_MARKERS)
 def test_crud_marker_present(schema, marker):
@@ -68,6 +88,23 @@ def test_crud_marker_present(schema, marker):
 @pytest.mark.parametrize("marker", AGGREGATE_MARKERS)
 def test_aggregate_marker_present(schema, marker):
     assert marker in schema.as_str()
+
+
+@pytest.mark.parametrize("marker", GROUPING_MARKERS)
+def test_grouping_marker_present(schema, marker):
+    assert marker in schema.as_str()
+
+
+def test_grouped_aggregate_is_the_free_type_no_reshape(schema):
+    """`<res>_group.aggregate` is the SAME free `NoteAggregate` — the grouped
+    surface composes the upstream typed key + free aggregate; it does not
+    reshape into a grouped envelope, and the old stringly-typed `KeyValue`
+    shape is gone."""
+    sdl = schema.as_str()
+    assert "type notes_group {" in sdl
+    assert "aggregate: NoteAggregate!" in sdl
+    assert "AggregateResponse" not in sdl
+    assert "KeyValue" not in sdl
 
 
 def test_pk_args_are_string_not_id(schema):

@@ -55,6 +55,7 @@ class NoteModel(models.Model):
     word_count = models.IntegerField(default=0)
     is_starred = models.BooleanField(default=False)
     status = models.CharField(max_length=20, default="draft")
+    metadata = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -67,6 +68,7 @@ class Note:
     word_count: auto
     is_starred: auto
     status: auto
+    metadata: auto
     updated_at: auto
 
     @strawberry.field

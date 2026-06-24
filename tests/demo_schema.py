@@ -60,6 +60,7 @@ class Note:  # GraphQL type name is `Note`
     word_count: auto
     is_starred: auto
     status: auto
+    metadata: auto
     updated_at: auto
 
     @strawberry.field
@@ -128,9 +129,17 @@ resource = hasura_resource(
     Note,
     model=NoteModel,
     name="notes",
-    filterable=["id", "title", "word_count", "is_starred", "status"],
+    filterable=[
+        "id",
+        "title",
+        "word_count",
+        "is_starred",
+        "status",
+        "metadata",
+    ],
     sortable=["title", "word_count", "updated_at"],
     aggregatable=["word_count"],
+    groupable=["status", "updated_at"],
     get_queryset=get_queryset,
     write_backend=NoteWriteBackend(),
     id_decode=decode_sqid,
@@ -154,11 +163,23 @@ def seed() -> None:
     if NoteModel.objects.exists():
         return
     NoteModel.objects.create(
-        title="Alpha", word_count=10, is_starred=True, status="published"
+        title="Alpha",
+        word_count=10,
+        is_starred=True,
+        status="published",
+        metadata={"kind": "note", "flags": ["pinned"]},
     )
     NoteModel.objects.create(
-        title="Bravo", word_count=30, is_starred=False, status="draft"
+        title="Bravo",
+        word_count=30,
+        is_starred=False,
+        status="draft",
+        metadata={"kind": "task", "flags": []},
     )
     NoteModel.objects.create(
-        title="Cee", word_count=20, is_starred=True, status="published"
+        title="Cee",
+        word_count=20,
+        is_starred=True,
+        status="published",
+        metadata={"kind": "note", "flags": []},
     )

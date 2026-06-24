@@ -47,20 +47,22 @@ def make_aggregate_container(
     aggregate_type: type,
     *,
     filtered_queryset: Callable[[Any, Any], QuerySet[Any]],
+    filtered_nodes_queryset: Callable[[Any, Any], QuerySet[Any]] | None = None,
     aggregate_resolver: Callable[[Any, Callable[[Any], QuerySet[Any]]], Any],
 ) -> type:
     """Build the ``<resource>_aggregate`` container type for one model.
 
-    The container exposes Hasura's two fields over the SAME filtered rows:
+    The container exposes Hasura's two fields over the same filtered row set:
 
     - ``aggregate: <Model>Aggregate`` — the native aggregate type from
     ``strawberry-django-aggregates`` (zero reshape), filled by
     ``aggregate_resolver``. - ``nodes: [<Node>!]`` — the filtered rows.
 
     ``name`` is the wire name (``"notes_aggregate"``). The query resolver
-    constructs the container with the request's ``where``; both fields then
-    derive the one already row-scoped, ``where``-filtered queryset via
-    ``filtered_queryset(info, where)``.
+    constructs the container with the request's ``where``. Consumers whose
+    aggregate math needs a different queryset policy than row nodes can pass
+    ``filtered_nodes_queryset``; otherwise both fields derive the same
+    filtered queryset.
     """
 
     # ``aggregate_type`` / ``node_type`` are runtime values, not names visible
@@ -81,7 +83,8 @@ def make_aggregate_container(
     }
 
     def resolve_nodes(self: Any, info: strawberry.Info) -> Any:
-        return list(filtered_queryset(info, self.where))
+        source = filtered_nodes_queryset or filtered_queryset
+        return list(source(info, self.where))
 
     resolve_nodes.__annotations__ = {
         "self": Any,
@@ -91,7 +94,7 @@ def make_aggregate_container(
 
     namespace: dict[str, Any] = {
         # Constructed by the ``<resource>_aggregate`` query resolver with the
-        # caller's ``where``; both fields derive the one filtered queryset.
+        # caller's ``where``; field resolvers derive their filtered queryset.
         "__annotations__": {
             "where": strawberry.Private[Any],  # type: ignore[misc]
         },

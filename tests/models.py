@@ -20,10 +20,35 @@ class NoteModel(models.Model):
     word_count = models.IntegerField(default=0)
     is_starred = models.BooleanField(default=False)
     status = models.CharField(max_length=20, default="draft")
+    metadata = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         app_label = "tests"
 
 
-__all__ = ["NoteModel"]
+class AuthorModel(models.Model):
+    name = models.CharField(max_length=200)
+
+    class Meta:
+        app_label = "tests"
+
+
+class TagModel(models.Model):
+    name = models.CharField(max_length=200)
+
+    class Meta:
+        app_label = "tests"
+
+
+class BookModel(models.Model):
+    title = models.CharField(max_length=200)
+    author = models.ForeignKey(AuthorModel, on_delete=models.CASCADE)
+    tags = models.ManyToManyField(TagModel, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "tests"
+
+
+__all__ = ["AuthorModel", "BookModel", "NoteModel", "TagModel"]

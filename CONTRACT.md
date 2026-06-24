@@ -38,6 +38,7 @@ composition:
 - comparators: `_eq, _neq, _gt, _gte, _lt, _lte, _in, _nin, _is_null`
 - string: `_like, _nlike, _ilike, _nilike` (+ Postgres-only `_iregex`,
   `_similar`, `_nsimilar` accepted in the SDL)
+- JSON: `_contains` for object/list containment, plus equality/null operators
 - composition: `_and: [notes_bool_exp!]`, `_or: [notes_bool_exp!]`,
   `_not: notes_bool_exp`
 
@@ -45,7 +46,8 @@ refine's `hasuraFilterOperatorMappings` sends `eq→_eq`, `ne→_neq`,
 `lt/gt/lte/gte`, `in→_in`, `nin→_nin`, `contains→_ilike`, `containss→_like`,
 `null/nnull→_is_null` (+ Postgres regex/similar for `startswith`/`endswith`).
 Maps to Django `Q`: `_eq→exact`, `_neq→~exact`, `_in→in`, `_nin→~in`,
-`_like→contains`, `_ilike→icontains`, `_gt→gt`, …, `_is_null:true→isnull`.
+`_like→contains`, `_ilike→icontains`, `_gt→gt`, …, `_is_null:true→isnull`;
+JSON `_contains` maps to Django `JSONField__contains`.
 
 The portable operators are mapped in the default `filtering._LOOKUPS`; the
 Postgres-only `_iregex`/`_similar`/`_nsimilar` are accepted in the SDL but
@@ -97,3 +99,50 @@ lookup in its own `_LOOKUPS`.
   a hand-written `meta.gqlQuery` that relies on the empty-operand edge should
   not assume Hasura semantics. Row scoping remains the consumer's `base_qs()`
   concern regardless (this library is permission-naive).
+
+## Grouping — NDC preview (NOT stock `@refinedev/hasura`)
+
+`<res>_groups` is a **preview** surface emitted **only** when the resource is
+built with `groupable=[...]`. It is *not* part of the stock `@refinedev/hasura`
+contract above — that provider never sends `group_by`. It is shaped to the
+Hasura v3 / NDC (Native Data Connector) `groups` semantics so a custom client
+(or a future DDN-compatible provider) can drive grouped analytics:
+
+```graphql
+notes_groups(
+  group_by: [NoteGroupBySpec!]!   # dimensions: { field, granularity }
+  where:    notes_bool_exp         # pre-group filter (the outer predicate)
+  having:   NoteHaving             # predicate over AGGREGATES only
+  order_by: [NoteGroupOrder!]      # by a dimension alias or an aggregate
+  limit: Int  offset: Int          # offset paging
+): [notes_group!]!
+
+type notes_group {
+  key:       NoteGroupKey!   # typed composite key — one field per dimension,
+                             #   choices→enum, date buckets + `_range` siblings
+  aggregate: NoteAggregate!  # the SAME free aggregate type — no reshape
+}
+```
+
+- **Composed, not forked.** The whole surface composes
+  `strawberry-django-aggregates` through its public API only: one
+  `AggregateBuilder` emits `NoteGroupKey` / `NoteGroupBySpec` / `NoteHaving` /
+  `NoteGroupOrder` (and the free `NoteAggregate`); `translate_group_by` /
+  `translate_having` / `translate_order_by` parse the wire inputs; and the row
+  shapers `shape_group_key` + `shape_aggregate_row` fill `{ key, aggregate }`.
+  The `aggregate` field IS the free `NoteAggregate` — the aggregate stays free.
+- Generated wire names are snake_case (`NoteGroupKey` columns; `NoteHaving`
+  operators like `count_gt` / `sum_<field>_gt`).
+- **Granularity** uses the aggregates `Granularity` enum (TIME `date_trunc` +
+  NUMBER `date_part` tracks). NDC models granularity as connector-declared
+  `extraction` functions; aligning to that naming is a forward step for when
+  DDN ships its GraphQL `group_by`.
+- Offset paging is **non-deterministic without `order_by`** (group rows have no
+  intrinsic order) — pass `order_by` for stable pages; build the resource with
+  `hasura_resource(max_groups=…)` to cap an unbounded high-cardinality grouping
+  (default uncapped). Reads run on the caller's scoped queryset
+  (permission-naive), with the Hasura `where` applied before grouping.
+- **Preview:** the DDN GraphQL `group_by` SDL is unpublished (Hasura
+  `graphql-engine#10786`), so these field/argument names may change to track it.
+  The stock list / aggregate / CRUD SDL above is unaffected (grouping is purely
+  additive).

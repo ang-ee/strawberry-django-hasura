@@ -121,8 +121,9 @@ schema = strawberry.Schema(
 ```
 
 `hasura_resource` derives the comparison / order scalar of each column from the
-**Django field**, and the `insert` / `_set` writable columns from the model's
-editable, non-pk, non-auto fields. Because it pins each wire name itself, the
+**Django field**, and the `insert` / `_set` writable fields from the model's
+editable, non-pk, non-auto concrete fields plus editable many-to-many relation
+arrays. Because it pins each wire name itself, the
 resource is correct on a stock *camelCase* schema (e.g. an Angee schema) with no
 schema-wide converter — `hasura_config()` (below) stays an optional convenience
 for a schema dedicated to a single dialect.

@@ -29,6 +29,7 @@ import datetime
 
 import strawberry
 from strawberry import UNSET
+from strawberry.scalars import JSON
 
 
 @strawberry.input(name="String_comparison_exp")
@@ -104,6 +105,14 @@ class DateTimeComparison:
     nin: list[datetime.datetime] | None = strawberry.field(
         name="_nin", default=UNSET
     )
+    is_null: bool | None = strawberry.field(name="_is_null", default=UNSET)
+
+
+@strawberry.input(name="JSON_comparison_exp")
+class JSONComparison:
+    eq: JSON | None = strawberry.field(name="_eq", default=UNSET)
+    neq: JSON | None = strawberry.field(name="_neq", default=UNSET)
+    contains: JSON | None = strawberry.field(name="_contains", default=UNSET)
     is_null: bool | None = strawberry.field(name="_is_null", default=UNSET)
 
 

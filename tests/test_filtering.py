@@ -20,6 +20,7 @@ from strawberry_django_hasura.comparisons import (
     FloatComparison,
     IDComparison,
     IntComparison,
+    JSONComparison,
     StringComparison,
 )
 from strawberry_django_hasura.filtering import _LOOKUPS, comparison_to_q
@@ -37,6 +38,7 @@ _COMPARISONS = [
     BooleanComparison,
     DateTimeComparison,
     IDComparison,
+    JSONComparison,
 ]
 
 
@@ -66,3 +68,8 @@ def test_set_but_unmapped_operator_raises_not_silently_drops():
 def test_mapped_operator_builds_the_expected_lookup():
     q = comparison_to_q("title", StringComparison(ilike="a"))
     assert ("title__icontains", "a") in q.children
+
+
+def test_json_contains_operator_builds_the_expected_lookup():
+    q = comparison_to_q("metadata", JSONComparison(contains={"kind": "note"}))
+    assert ("metadata__contains", {"kind": "note"}) in q.children

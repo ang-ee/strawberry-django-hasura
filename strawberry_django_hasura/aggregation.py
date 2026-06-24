@@ -35,8 +35,8 @@ from strawberry_django_aggregates import (
     AggregateBuilder,
     AggregateOp,
     compute_aggregation,
+    shape_aggregate_row,
 )
-from strawberry_django_aggregates.builder import shape_aggregate_row
 
 # Hasura ``aggregate`` sub-field name -> AggregateOp. The wire is snake_case
 # (Hasura convention), which equals the AggregateOp *value*, so the map is
@@ -83,40 +83,53 @@ def _selected_fields(selections: list[Selection]) -> list[SelectedField]:
     return out
 
 
+def _ops_from_aggregate_blocks(
+    blocks: list[SelectedField],
+) -> list[tuple[AggregateOp, str | None]]:
+    """Map selected ``aggregate`` sub-fields to deduped ``(op, field)`` pairs.
+
+    ``blocks`` are the children of an ``aggregate`` selection: ``count`` (→
+    ``(COUNT, None)``) and one node per measure op (``sum``/``avg``/…), whose
+    own children name the measured columns (→ ``(op, "word_count")``).
+    ``count`` is always included (the non-null ``Int!``); pairs are deduped
+    preserving first-seen order (deterministic SQL). Shared by the free
+    ``<res>_aggregate`` resolver and the grouped ``<res>_groups`` resolver.
+    """
+    requested: list[tuple[AggregateOp, str | None]] = []
+    for block in blocks:
+        op = _OP_FROM_WIRE.get(block.name)
+        if op is None:
+            continue
+        if op is AggregateOp.COUNT:
+            requested.append((op, None))
+            continue
+        for member in _selected_fields(block.selections):
+            requested.append((op, member.name))
+    if (AggregateOp.COUNT, None) not in requested:
+        requested.insert(0, (AggregateOp.COUNT, None))
+    seen: set[tuple[AggregateOp, str | None]] = set()
+    out: list[tuple[AggregateOp, str | None]] = []
+    for entry in requested:
+        if entry not in seen:
+            seen.add(entry)
+            out.append(entry)
+    return out
+
+
 def _requested_ops(
     info: strawberry.Info,
 ) -> list[tuple[AggregateOp, str | None]]:
     """Walk the ``aggregate { … }`` selection into ``(op, field)`` pairs.
 
-    The resolver is the ``aggregate`` field, so ``info.selected_fields`` are
-    its children: ``count`` (→ ``(COUNT, None)``) and one node per measure op
-    (``sum``/``avg``/``min``/``max``/…), whose children name the measured
-    columns (→ ``(op, "word_count")``). Only the selected pairs are computed.
+    The resolver IS the ``aggregate`` field, so ``info.selected_fields``'
+    children are the op blocks.
     """
-    requested: list[tuple[AggregateOp, str | None]] = []
-    for top in info.selected_fields:
-        for block in _selected_fields(top.selections):
-            op = _OP_FROM_WIRE.get(block.name)
-            if op is None:
-                continue
-            if op is AggregateOp.COUNT:
-                requested.append((op, None))
-                continue
-            for member in _selected_fields(block.selections):
-                requested.append((op, member.name))
-    # ``count`` is the non-null ``Int!`` field — always compute it so the
-    # type has a value even when the client selects only measures.
-    if (AggregateOp.COUNT, None) not in requested:
-        requested.insert(0, (AggregateOp.COUNT, None))
-    # Deduplicate, preserving first-seen order (deterministic SQL).
-    seen: set[tuple[AggregateOp, str | None]] = set()
-    out: list[tuple[AggregateOp, str | None]] = []
-    for entry in requested:
-        if entry in seen:
-            continue
-        seen.add(entry)
-        out.append(entry)
-    return out
+    blocks = [
+        block
+        for top in info.selected_fields
+        for block in _selected_fields(top.selections)
+    ]
+    return _ops_from_aggregate_blocks(blocks)
 
 
 def make_aggregate_resolver(

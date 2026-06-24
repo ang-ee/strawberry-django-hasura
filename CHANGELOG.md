@@ -5,7 +5,7 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-06-24
 
 ### Added
 
@@ -22,6 +22,34 @@ and this project adheres to
   / `types` bundle) and the `WriteBackend` protocol (the caller's
   authorized-write seam) (`resource.py`). The toy `tests/demo_schema.py` now
   builds its resource in this one call.
+- **Grouping (`<res>_groups`) — NDC preview.** An optional grouped-aggregation
+  root, enabled per resource with `hasura_resource(..., groupable=[...])`. Emits
+  `<res>_groups(group_by, where, having, order_by, limit, offset): [<res>_group!]`
+  where `<res>_group { key: <Model>GroupKey!, aggregate: <Model>Aggregate! }` —
+  the typed group key paired with the **free** `<Model>Aggregate` (no reshape),
+  composing `strawberry-django-aggregates`' public grouped surface
+  (`shape_group_key` + `translate_group_by`/`translate_having`/`translate_order_by`
+  + `shape_aggregate_row`). Shaped to the Hasura v3 / NDC `groups` semantics;
+  **not** part of the stock `@refinedev/hasura` contract — preview (see
+  `CONTRACT.md` "Grouping — NDC preview" and `ROADMAP.md`) (`grouping.py`).
+- **JSON column filtering** — a `JSON_comparison_exp` (`_eq` / `_neq` /
+  `_contains` / `_is_null`); `_contains` maps to Django `JSONField__contains`
+  (`comparisons.py`, `filtering.py`).
+- **Public-id foreign-key filters** — a `field_id_decode` hook decodes
+  opaque-string (sqid) operands for non-`id` scalar columns (e.g. an FK exposed
+  as a public id), threaded through the whole `where` walk including nested
+  `_and` / `_or` / `_not` (`filtering.where_to_q`).
+- **Write allowlists + operation toggles** — `hasura_resource(...)` takes
+  `writable` / `insertable` / `updatable` column allowlists (fail-loud on unknown
+  names) and `insert` / `update` / `delete` toggles to scope the mutation
+  surface, plus a `get_aggregate_queryset` override for the aggregate/groups read
+  source (`resource.py`).
+
+### Changed
+
+- Requires **`strawberry-django-aggregates >= 0.7.0`** — the release that adds
+  the public `shape_group_key` / `translate_*` composition seam the grouping
+  surface builds on.
 
 ## [0.1.0] — 2026-06-23
 
@@ -62,4 +90,5 @@ for the target SDL and [`AGENTS.md`](./AGENTS.md) for the architecture.
   schema built with this library, and an in-memory SQLite test suite covering
   every surface plus the emitted-SDL contract.
 
+[0.2.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.1.0
