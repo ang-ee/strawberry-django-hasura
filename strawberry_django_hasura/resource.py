@@ -32,11 +32,7 @@ optional convenience for a schema dedicated to a single dialect.
 
 from __future__ import annotations
 
-import datetime
-import decimal
-import sys
 import types
-import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
@@ -49,51 +45,29 @@ from strawberry_django.fields.types import field_type_map
 from strawberry_django_aggregates import AggregateBuilder
 
 from .aggregation import make_aggregate_resolver
-from .comparisons import (
-    BooleanComparison,
-    DateTimeComparison,
-    FloatComparison,
-    IDComparison,
-    IntComparison,
-    JSONComparison,
-    StringComparison,
-)
+from .comparisons import IDComparison
 from .connection import make_aggregate_container, paginate
 from .filtering import where_to_q
 from .grouping import make_groups_field
+from .inputs import (
+    ID_WIRE_NAME as _ID_WIRE_NAME,
+)
+from .inputs import (
+    build_bool_exp,
+    build_order_by,
+    comparison_for_python_type,
+)
+from .inputs import (
+    host_module as _host_module,
+)
+from .inputs import (
+    input_type as _input_type,
+)
+from .inputs import (
+    pin_snake_wire_names as _pin_snake_wire_names,
+)
 from .mutations import input_to_dict
-from .ordering import OrderBy, apply_ordering
-
-# The column's python type is the **Django field's** fact: strawberry-django
-# owns ``model field -> python type`` in ``field_type_map`` (keyed by field
-# class), and the node type is built from it. We ask that owner rather than
-# re-deriving a parallel scalar table (which drifts). ``_column_python_type``
-# walks the field's MRO so a subclass (``EmailField`` → ``CharField``) inherits
-# its base mapping.
-#
-# This map is the one fact the *adapter* owns: the Hasura ``*_comparison_exp``
-# input for each python scalar (its filter operator vocabulary). ``strawberry``
-# ``ID`` is the pk / public ``id`` surface (String-typed args refine's
-# ``idType`` binds — see ``comparisons``/``filtering``).
-_COMPARISON_FOR_TYPE: dict[Any, type] = {
-    str: StringComparison,
-    uuid.UUID: StringComparison,
-    int: IntComparison,
-    float: FloatComparison,
-    decimal.Decimal: FloatComparison,
-    bool: BooleanComparison,
-    datetime.datetime: DateTimeComparison,
-    datetime.date: DateTimeComparison,
-    datetime.time: DateTimeComparison,
-    strawberry.ID: IDComparison,
-    strawberry.scalars.JSON: JSONComparison,
-}
-
-#: The fixed refine ``idType`` wire field name. refine derives the id variable
-#: (``$id``) from this name, so its comparison is always ``IDComparison`` and
-#: its pk-arg surface is String-typed — independent of the Django ``id_column``
-#: it resolves against (see ``CONTRACT.md`` — sqid / idType boundary).
-_ID_WIRE_NAME = "id"
+from .ordering import apply_ordering
 
 
 class WriteBackend(Protocol):
@@ -123,97 +97,13 @@ class HasuraResource:
     ``query`` / ``mutation`` carry the root field holders; ``types`` carries
     the generated container + ``<Model>Aggregate`` and the input types. A
     schema bucket merges these as the hand-wired resource exposed them.
+    A read-only resource (all of insert/update/delete disabled) carries an
+    empty mutation holder — it merges to nothing.
     """
 
     query: type
     mutation: type
     types: list[type]
-
-
-def _pin_snake_wire_names(
-    strawberry_type: type,
-    seen: set[int] | None = None,
-) -> None:
-    """Pin each field's GraphQL wire name to its snake_case python name.
-
-    Walks the type (and its nested object types — the ``<Model>Aggregate``'s
-    ``sum`` / ``avg`` / … measure types) and, where strawberry would otherwise
-    camelCase a snake_case python identifier, pins the verbatim snake name. An
-    explicit ``strawberry.field(name=...)`` already set a ``graphql_name`` and
-    is left untouched. This is the same wire effect as
-    :func:`~strawberry_django_hasura.naming.hasura_config`, scoped to the types
-    this builder generates, so a consumer on a camelCase schema gets snake_case
-    wire names for this resource without a schema-wide converter.
-    """
-    definition = get_object_definition(strawberry_type)
-    if definition is None:
-        return
-    seen = seen or set()
-    marker = id(definition)
-    if marker in seen:
-        return
-    seen.add(marker)
-    for field in definition.fields:
-        if field.graphql_name is None and "_" in field.python_name:
-            field.graphql_name = field.python_name
-        for arg in field.arguments:
-            if arg.graphql_name is None and "_" in arg.python_name:
-                arg.graphql_name = arg.python_name
-        inner = field.type
-        while hasattr(inner, "of_type"):
-            inner = inner.of_type
-        nested = get_object_definition(inner)
-        if nested is not None and nested is not definition:
-            _pin_snake_wire_names(cast("type", inner), seen)
-
-
-def _host_module(name: str) -> types.ModuleType:
-    """A synthetic module to host this resource's generated types.
-
-    The ``<res>_bool_exp`` input references itself (``_and`` / ``_or`` /
-    ``_not``); strawberry resolves those forward references against the type's
-    module globals at schema-build time, so the generated types must live in a
-    real, importable module namespace.
-    """
-    module_name = f"{__name__}._generated.{name}"
-    module = sys.modules.get(module_name)
-    if module is None:
-        module = types.ModuleType(module_name)
-        sys.modules[module_name] = module
-    return module
-
-
-def _input_type(
-    name: str,
-    annotations: dict[str, Any],
-    *,
-    module: types.ModuleType,
-    defaults: dict[str, Any] | None = None,
-    fields: dict[str, Any] | None = None,
-) -> type:
-    """Build a ``strawberry.input`` from a name → annotation mapping.
-
-    ``defaults`` supplies a per-attr default value (a required field is left
-    out) and ``fields`` a per-attr ``strawberry.field(...)`` (the ``_and`` /
-    ``_or`` / ``_not`` wire names). Hosted in ``module`` so forward refs
-    resolve.
-    """
-    namespace: dict[str, Any] = {
-        "__annotations__": annotations,
-        "__module__": module.__name__,
-    }
-    for attr, value in (defaults or {}).items():
-        namespace[attr] = value
-    for attr, value in (fields or {}).items():
-        namespace[attr] = value
-    built = strawberry.input(type(name, (), namespace), name=name)
-    setattr(module, name, built)
-    # Pin the snake_case column names this input declares (a default schema
-    # would camelCase ``word_count`` → ``wordCount``). The nested
-    # ``*_comparison_exp`` / ``order_by`` members already carry explicit wire
-    # names, so the ``graphql_name is None`` guard leaves them untouched.
-    _pin_snake_wire_names(built)
-    return built
 
 
 def _column_python_type(field: Any) -> Any:
@@ -246,16 +136,11 @@ def _comparison_for(
     """The ``*_comparison_exp`` input for a scalar Django field.
 
     The column's python type comes from the owner; this maps that scalar onto
-    the adapter's own Hasura comparison vocabulary.
+    the adapter's own Hasura comparison vocabulary (``inputs``).
     """
-    python = strawberry.ID if public_id else _column_python_type(field)
-    comparison = _COMPARISON_FOR_TYPE.get(python)
-    if comparison is None:
-        raise TypeError(
-            f"field {field.name!r} (python type {python!r}) has no Hasura "
-            "comparison input; it is not a filterable scalar"
-        )
-    return comparison
+    return comparison_for_python_type(
+        strawberry.ID if public_id else _column_python_type(field)
+    )
 
 
 def _writable_fields(
@@ -422,51 +307,26 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     module = _host_module(res)
     get_field = model._meta.get_field
 
-    # --- where / order_by / mutation inputs (derived from the Django fields) -
-    bool_exp_name = f"{res}_bool_exp"
+    # --- where / order_by inputs (derived from the Django fields) ------------
     # ``id`` is the fixed refine ``idType`` wire name (not the Django column,
-    # which is ``id_column``): refine declares the id variable ``$id``, so its
-    # comparison is always ``IDComparison`` (the String-typed pk surface — see
-    # ``comparisons`` / ``CONTRACT.md``). It is also often a resolver-only
-    # public field, so it never reaches ``get_field``.
-    bool_exp_ann: dict[str, Any] = {
-        col: (
-            IDComparison
-            if col == _ID_WIRE_NAME
-            else _comparison_for(
-                get_field(col),
-                public_id=col in public_id_fields,
+    # which is ``id_column``): its comparison is always ``IDComparison`` (the
+    # String-typed pk surface) and it never reaches ``get_field``. The bool_exp
+    # / order_by assembly itself is the model-independent ``inputs`` owner.
+    bool_exp = build_bool_exp(
+        res,
+        {
+            col: (
+                IDComparison
+                if col == _ID_WIRE_NAME
+                else _comparison_for(
+                    get_field(col), public_id=col in public_id_fields
+                )
             )
-        )
-        | None
-        for col in filterable
-    }
-    bool_exp_defaults: dict[str, Any] = dict.fromkeys(filterable, UNSET)
-    # Self-referential boolean composition (resolved via ``module`` globals).
-    bool_exp_ann |= {
-        "and_": f"list[{bool_exp_name}] | None",
-        "or_": f"list[{bool_exp_name}] | None",
-        "not_": f"{bool_exp_name} | None",
-    }
-    bool_exp_fields = {
-        "and_": strawberry.field(name="_and", default=UNSET),
-        "or_": strawberry.field(name="_or", default=UNSET),
-        "not_": strawberry.field(name="_not", default=UNSET),
-    }
-    bool_exp = _input_type(
-        bool_exp_name,
-        bool_exp_ann,
-        module=module,
-        defaults=bool_exp_defaults,
-        fields=bool_exp_fields,
+            for col in filterable
+        },
+        module,
     )
-
-    order_by_input = _input_type(
-        f"{res}_order_by",
-        dict.fromkeys(sortable, OrderBy | None),
-        module=module,
-        defaults=dict.fromkeys(sortable, UNSET),
-    )
+    order_by_input = build_order_by(res, sortable, module)
 
     insert_fields = _writable_fields(
         model,
@@ -722,6 +582,8 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             name=f"delete_{res}_by_pk",
         )
 
+    # A read-only resource (no enabled operations) yields an empty mutation
+    # holder; it merges to nothing, so a consumer may register it uniformly.
     mutation = strawberry.type(type(f"{res}__mutation", (), mutation_fields))
 
     # Pin snake_case on the root holders' fields + arguments (``order_by`` /

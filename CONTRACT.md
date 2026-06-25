@@ -100,6 +100,32 @@ lookup in its own `_LOOKUPS`.
   not assume Hasura semantics. Row scoping remains the consumer's `base_qs()`
   concern regardless (this library is permission-naive).
 
+## Non-model resources (`hasura_run_query_resource`)
+
+A resource whose rows are computed/foreign (no Django table) is built with
+`hasura_run_query_resource(node, *, name, filterable, sortable, source)`. It
+emits the **same** stock surface as a model resource — the `<res>` list (with
+`where` / `order_by` / `limit` / `offset`), `<res>_by_pk(id)`, and
+`<res>_aggregate { aggregate { count } nodes }` — with two differences:
+
+- **Read-only.** No `insert`/`update`/`delete` roots (an empty mutation holder
+  that merges to nothing).
+- **Count-only aggregate.** `<Node>Aggregate` carries only `count: Int!` (a
+  computed source needs the row total for pagination, not the SQL aggregate
+  compiler).
+
+`source` is a `RowSource` — `query(info, *, where, order_by, limit, offset)` and
+`count(info, *, where)` — the pushdown seam. The default `InMemoryRowSource`
+evaluates the `<res>_bool_exp` / `order_by` / paging in Python via
+`where_matches` / `apply_in_memory` (the in-memory sibling of `where_to_q`); a
+transport-backed source pushes the predicate to its owner. The same `_bool_exp`
+operator set and fail-fast-on-unmapped-operator stance as the model path apply.
+
+In-memory NULL semantics follow the model path's default SQLite backend: NULLs
+sort **first on `asc`, last on `desc`**; a positive `_like`/`_ilike` does **not**
+match a NULL row (the negated family does, like Django's `~Q`); and an explicit
+`null` operand (e.g. `_gt: null`) carries no constraint — use `_is_null`.
+
 ## Grouping — NDC preview (NOT stock `@refinedev/hasura`)
 
 `<res>_groups` is a **preview** surface emitted **only** when the resource is

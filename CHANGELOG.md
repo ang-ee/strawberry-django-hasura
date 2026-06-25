@@ -5,6 +5,30 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-06-25
+
+### Added
+
+- **`hasura_run_query_resource(...)`** — a read-only Hasura resource whose rows
+  come from a caller-supplied **`RowSource`**, not a Django model. It emits the
+  same list / `<res>_aggregate { aggregate { count } }` / `<res>_by_pk` SDL as
+  `hasura_resource`, sharing the dialect machinery. The aggregate is
+  **count-only** (a computed source needs only the row total for pagination, not
+  the SQL aggregate compiler). For computed / foreign data with no table.
+- **`RowSource` protocol + `InMemoryRowSource`** — the pushdown seam.
+  `RowSource.query` / `.count` receive the parsed `where` so a transport-backed
+  source can push the predicate down; `InMemoryRowSource` evaluates it in Python
+  over a row iterable.
+- **`where_matches` / `apply_in_memory`** — the in-memory dialect evaluator (the
+  Python sibling of `filtering.where_to_q`): interprets a `<res>_bool_exp` into a
+  per-row predicate and applies ordering + paging over a list.
+
+### Changed
+
+- The `<res>_bool_exp` / `<res>_order_by` input assembly and the snake_case wire
+  pinning moved to **`inputs.py`**, composed by both `hasura_resource` and
+  `hasura_run_query_resource` (no behaviour change to the model path).
+
 ## [0.2.0] — 2026-06-24
 
 ### Added

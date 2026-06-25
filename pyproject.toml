@@ -1,6 +1,6 @@
 [project]
 name            = "strawberry-django-hasura"
-version         = "0.2.0"
+version         = "0.3.0"
 description     = "Expose Django models over GraphQL in the Hasura convention — the stock @refinedev/hasura refine data provider drives Strawberry/Django, composing strawberry-django + strawberry-django-aggregates (aggregates for free)."
 readme          = "README.md"
 requires-python = ">=3.14"

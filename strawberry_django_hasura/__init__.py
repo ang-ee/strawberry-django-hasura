@@ -22,21 +22,33 @@ from .mutations import input_to_dict
 from .naming import SnakeNameConverter, hasura_config
 from .ordering import OrderBy, apply_ordering, order_clauses
 from .resource import HasuraResource, WriteBackend, hasura_resource
+from .run_query import (
+    InMemoryRowSource,
+    RowSource,
+    apply_in_memory,
+    hasura_run_query_resource,
+    where_matches,
+)
 
 __all__ = [
     "HasuraResource",
+    "InMemoryRowSource",
     "OrderBy",
+    "RowSource",
     "SnakeNameConverter",
     "WriteBackend",
+    "apply_in_memory",
     "apply_ordering",
     "build_aggregate_type",
     "comparison_to_q",
     "hasura_config",
     "hasura_resource",
+    "hasura_run_query_resource",
     "input_to_dict",
     "make_aggregate_container",
     "make_aggregate_resolver",
     "order_clauses",
     "paginate",
+    "where_matches",
     "where_to_q",
 ]
