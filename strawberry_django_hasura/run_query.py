@@ -35,6 +35,8 @@ from strawberry import UNSET
 from strawberry.types import get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
 
+from .comparisons import IDComparison
+from .filtering import PORTABLE_LOOKUPS
 from .inputs import (
     ID_WIRE_NAME,
     build_bool_exp,
@@ -48,6 +50,34 @@ from .resource import HasuraResource
 
 # --- the in-memory dialect evaluator (Python sibling of where_to_q) ----------
 
+
+def _as_text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _ordered(
+    op: Callable[[Any, Any], bool],
+) -> Callable[[Any, Any], bool]:
+    """Wrap an ordering predicate so it never raises mid-filter.
+
+    A NULL row value or an *uncomparable* value/operand pair — a ``date`` row
+    against a ``datetime`` operand (``DateTimeComparison`` maps both), a naive
+    datetime against a tz-aware one — excludes the row rather than crashing the
+    whole query. This is the in-memory analogue of SQL's three-valued logic,
+    where such a comparison is UNKNOWN and yields no match.
+    """
+
+    def predicate(value: Any, operand: Any) -> bool:
+        if value is None:
+            return False
+        try:
+            return op(value, operand)
+        except TypeError:
+            return False
+
+    return predicate
+
+
 # Hasura comparison attr (the python name behind the ``_eq`` wire field) -> a
 # ``(row_value, operand) -> bool`` predicate. Mirrors ``filtering._LOOKUPS`` —
 # the same portable operator set, evaluated in Python instead of compiled to a
@@ -58,15 +88,16 @@ from .resource import HasuraResource
 _LOOKUP_OPS: dict[str, Callable[[Any, Any], bool]] = {
     "eq": lambda value, operand: value == operand,
     "neq": lambda value, operand: value != operand,
-    "gt": lambda value, operand: value is not None and value > operand,
-    "gte": lambda value, operand: value is not None and value >= operand,
-    "lt": lambda value, operand: value is not None and value < operand,
-    "lte": lambda value, operand: value is not None and value <= operand,
+    "gt": _ordered(lambda value, operand: value > operand),
+    "gte": _ordered(lambda value, operand: value >= operand),
+    "lt": _ordered(lambda value, operand: value < operand),
+    "lte": _ordered(lambda value, operand: value <= operand),
     "in_": lambda value, operand: value in operand,
     "nin": lambda value, operand: value not in operand,
     # The positive ``like`` family does not match a NULL row (Django's
     # ``col LIKE x`` is unknown for NULL → excluded); the negated family does
-    # match NULL (Django's ``~Q(col__contains=x)`` includes NULL rows).
+    # match NULL (verified: Django's ``filter(~Q(col__contains=x))`` returns
+    # NULL rows, the same three-valued logic as ``_neq`` / ``_nin``).
     "like": lambda value, operand: (
         value is not None and operand in _as_text(value)
     ),
@@ -80,9 +111,15 @@ _LOOKUP_OPS: dict[str, Callable[[Any, Any], bool]] = {
     "contains": lambda value, operand: _json_contains(value, operand),
 }
 
-
-def _as_text(value: Any) -> str:
-    return "" if value is None else str(value)
+# The two sibling builders must accept the same portable operator set: the
+# model path compiles ``filtering._LOOKUPS`` to ORM lookups, this path runs
+# ``_LOOKUP_OPS`` in Python. Adding an operator to one map but not the other
+# would silently diverge the resources — fail loud at import instead.
+if set(_LOOKUP_OPS) != PORTABLE_LOOKUPS:
+    raise RuntimeError(
+        "run_query._LOOKUP_OPS must mirror filtering._LOOKUPS key-for-key; "
+        f"differs by {set(_LOOKUP_OPS) ^ PORTABLE_LOOKUPS}"
+    )
 
 
 def _json_contains(value: Any, operand: Any) -> bool:
@@ -97,10 +134,19 @@ def _json_contains(value: Any, operand: Any) -> bool:
 def _comparison_matches(value: Any, comparison: Any) -> bool:
     """AND together every operator set on one field comparison.
 
-    Mirrors ``filtering.comparison_to_q``: an operator the SDL accepts but the
-    evaluator does not map (a Postgres-only ``_iregex`` / ``_similar``) raises
-    rather than being silently dropped.
+    The public ``id`` surface is GraphQL ``String`` (operands deserialize
+    to ``str``), but a row's id may be ``int`` / ``uuid``; coerce the value
+    to text for an ``IDComparison`` so ``_eq`` / ``_in`` / ``_neq`` agree with
+    ``<res>_by_pk`` (which matches by string) for non-string ids.
+
+    Unmapped operators are rejected up front by :func:`_validate_where` (once
+    per request, so an empty row source still fails loud), not here.
     """
+    compare_value = (
+        str(value)
+        if value is not None and isinstance(comparison, IDComparison)
+        else value
+    )
     for attr, predicate in _LOOKUP_OPS.items():
         operand = getattr(comparison, attr, UNSET)
         # An explicit ``null`` operand (e.g. ``_gt: null``) carries no
@@ -108,7 +154,7 @@ def _comparison_matches(value: Any, comparison: Any) -> bool:
         # ``in`` / ``.lower()`` on ``None``. ``_is_null`` tests for NULL.
         if operand is UNSET or operand is None:
             continue
-        if not predicate(value, operand):
+        if not predicate(compare_value, operand):
             return False
     is_null = getattr(comparison, "is_null", UNSET)
     if (
@@ -117,6 +163,17 @@ def _comparison_matches(value: Any, comparison: Any) -> bool:
         and (value is None) != bool(is_null)
     ):
         return False
+    return True
+
+
+def _validate_comparison(comparison: Any) -> None:
+    """Raise if a field comparison sets an operator the evaluator cannot map.
+
+    Mirrors ``filtering.comparison_to_q``: a Postgres-only ``_iregex`` /
+    ``_similar`` the SDL accepts but this path does not evaluate raises rather
+    than being silently dropped — on a permission-naive read a dropped filter
+    would *widen* the result set.
+    """
     for field in dataclasses.fields(comparison):
         if field.name in _LOOKUP_OPS or field.name == "is_null":
             continue
@@ -125,7 +182,28 @@ def _comparison_matches(value: Any, comparison: Any) -> bool:
                 f"filter operator {field.name!r} is accepted in the SDL but "
                 "not supported by the in-memory row source"
             )
-    return True
+
+
+def _validate_where(where: Any) -> None:
+    """Walk a ``<res>_bool_exp`` once, raising on any unmapped operator.
+
+    Run once per request (before iterating rows) so the fail-fast fires even
+    when the row source is empty — unlike a per-row check, which a zero-row
+    source would skip, silently accepting an unsupported filter.
+    """
+    if where is None or where is UNSET:
+        return
+    for field in dataclasses.fields(where):
+        value = getattr(where, field.name, UNSET)
+        if value is UNSET or value is None:
+            continue
+        if field.name in ("and_", "or_"):
+            for sub in value:
+                _validate_where(sub)
+        elif field.name == "not_":
+            _validate_where(value)
+        else:
+            _validate_comparison(value)
 
 
 def _is_empty_where(where: Any) -> bool:
@@ -156,7 +234,9 @@ def where_matches(where: Any, row: Any) -> bool:
             if not all(where_matches(sub, row) for sub in value):
                 return False
         elif field.name == "or_":
-            if not any(where_matches(sub, row) for sub in value):
+            # An empty ``_or`` is a no-op (``where_to_q`` ANDs an empty ``Q``,
+            # matching every row), not an exclude-all.
+            if value and not any(where_matches(sub, row) for sub in value):
                 return False
         elif field.name == "not_":
             # ``~Q()`` matches every row, so an empty ``_not`` is a no-op, not
@@ -187,10 +267,25 @@ def _field_sorter(name: str) -> Callable[[Any], tuple[bool, Any]]:
     return lambda row: _sort_key(_row_value(row, name))
 
 
-def order_rows(rows: Sequence[Any], order_by: list[Any] | None) -> list[Any]:
-    """Apply a Hasura ``order_by`` list to rows (stable, multi-key)."""
+def order_rows(
+    rows: Sequence[Any],
+    order_by: list[Any] | None,
+    *,
+    id_field: str | None = None,
+) -> list[Any]:
+    """Apply a Hasura ``order_by`` list to rows (stable, multi-key).
+
+    ``id_field`` (when given) is appended as the lowest-priority sort key so
+    ``limit`` / ``offset`` paging is deterministic over a source whose row
+    order is not stable across requests — the in-memory analogue of
+    ``connection.paginate``'s ``pk`` tiebreaker. It only breaks ties the
+    caller's ``order_by`` leaves, and is a no-op for rows lacking the field.
+    """
+    clauses = order_clauses(order_by)
+    if id_field is not None:
+        clauses = [*clauses, id_field]
     result = list(rows)
-    for clause in reversed(order_clauses(order_by)):
+    for clause in reversed(clauses):
         descending = clause.startswith("-")
         field = clause[1:] if descending else clause
         result.sort(key=_field_sorter(field), reverse=descending)
@@ -203,10 +298,13 @@ def apply_in_memory(
     order_by: list[Any] | None,
     limit: int | None,
     offset: int | None,
+    *,
+    id_field: str | None = None,
 ) -> list[Any]:
     """Filter, order, and page a row iterable per the Hasura request."""
+    _validate_where(where)
     matched = [row for row in rows if where_matches(where, row)]
-    ordered = order_rows(matched, order_by)
+    ordered = order_rows(matched, order_by, id_field=id_field)
     start = offset or 0
     return ordered[start:] if limit is None else ordered[start : start + limit]
 
@@ -272,8 +370,16 @@ class InMemoryRowSource:
     data — there is no transport to push the predicate down to.
     """
 
-    def __init__(self, get_rows: Callable[[strawberry.Info], Iterable[Any]]):
+    def __init__(
+        self,
+        get_rows: Callable[[strawberry.Info], Iterable[Any]],
+        *,
+        id_field: str = ID_WIRE_NAME,
+    ):
         self._get_rows = get_rows
+        # The stable paging tiebreaker (mirrors the queryset path's ``pk``).
+        # Match the resource's ``id_field`` when it is not the default ``id``.
+        self._id_field = id_field
 
     def _rows(self, info: strawberry.Info) -> list[Any]:
         # Materialise once per request so the list + count roots of a single
@@ -297,10 +403,16 @@ class InMemoryRowSource:
         offset: int | None,
     ) -> list[Any]:
         return apply_in_memory(
-            self._rows(info), where, order_by, limit, offset
+            self._rows(info),
+            where,
+            order_by,
+            limit,
+            offset,
+            id_field=self._id_field,
         )
 
     def count(self, info: strawberry.Info, *, where: Any) -> int:
+        _validate_where(where)
         return sum(1 for row in self._rows(info) if where_matches(where, row))
 
 
@@ -308,12 +420,19 @@ class InMemoryRowSource:
 
 
 def _node_field_python_types(node: type) -> dict[str, Any]:
-    """Map each node field's wire name to the python scalar it carries."""
+    """Map each node field's python attr name to the scalar it carries.
+
+    Keyed by ``python_name`` — the attribute ``where_matches`` / ``order_rows``
+    read off a row with ``getattr``, and the name a ``filterable`` /
+    ``sortable`` column refers to — not the wire name. A node field with an
+    explicit camelCase ``strawberry.field(name=...)`` would otherwise be
+    filtered/sorted against the (absent) wire attribute, matching nothing.
+    """
     definition = get_object_definition(node)
     if definition is None:
         raise TypeError(f"{node!r} is not a strawberry type")
     return {
-        (field.graphql_name or field.python_name): _python_type_of(field.type)
+        field.python_name: _python_type_of(field.type)
         for field in definition.fields
     }
 
@@ -429,6 +548,15 @@ def hasura_run_query_resource(
             f"hasura_run_query_resource({name!r}) declares unknown node "
             f"field(s) {missing!r}"
         )
+    if id_field not in filterable:
+        # ``by_pk`` resolves through an ``id _eq`` ``<res>_bool_exp`` so a
+        # transport source pushes the lookup down; that requires ``id_field``
+        # to be a generated comparison column. (The Hasura dialect filters by
+        # id anyway — ``<res>_bool_exp.id`` always exists.)
+        raise TypeError(
+            f"hasura_run_query_resource({name!r}) id_field {id_field!r} must "
+            f"be listed in filterable {list(filterable)!r}"
+        )
     bool_exp = build_bool_exp(
         res,
         {
@@ -478,13 +606,16 @@ def hasura_run_query_resource(
     }
 
     def resolve_by_pk(self: Any, info: strawberry.Info, id: str) -> Any | None:
+        # Push an ``id _eq`` predicate through the source (a transport source
+        # turns it into an indexed lookup; the in-memory source filters it) and
+        # bound to one row — instead of pulling the whole dataset and scanning.
+        # Routing through the same ``<res>_bool_exp`` keeps ``by_pk`` and the
+        # list's ``id { _eq }`` filter byte-for-byte consistent.
+        where = bool_exp(**{id_field: IDComparison(eq=id)})
         rows = source.query(
-            info, where=None, order_by=None, limit=None, offset=None
+            info, where=where, order_by=None, limit=1, offset=None
         )
-        return next(
-            (row for row in rows if str(_row_value(row, id_field)) == str(id)),
-            None,
-        )
+        return rows[0] if rows else None
 
     resolve_by_pk.__annotations__ = {
         "self": Any,

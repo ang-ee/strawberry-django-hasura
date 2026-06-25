@@ -49,6 +49,13 @@ _LOOKUPS: dict[str, tuple[str, bool]] = {
     "contains": ("__contains", False),
 }
 
+#: The portable operator vocabulary (the keys of ``_LOOKUPS``). The in-memory
+#: evaluator in ``run_query`` keeps its own ``(value, operand) -> bool``
+#: predicate map but asserts its keys against this set at import, so adding a
+#: portable operator to one path without the other fails loud instead of
+#: silently diverging the model and row-source siblings.
+PORTABLE_LOOKUPS = frozenset(_LOOKUPS)
+
 _AND = "and_"
 _OR = "or_"
 _NOT = "not_"

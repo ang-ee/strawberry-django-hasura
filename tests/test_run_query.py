@@ -9,14 +9,20 @@ through the in-memory dialect evaluator.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import decimal
+from typing import Any
 
+import pytest
 import strawberry
 
 from strawberry_django_hasura import (
     InMemoryRowSource,
+    apply_in_memory,
     hasura_run_query_resource,
 )
+from strawberry_django_hasura.filtering import PORTABLE_LOOKUPS
+from strawberry_django_hasura.run_query import _LOOKUP_OPS
 
 
 @dataclasses.dataclass
@@ -162,3 +168,206 @@ def test_empty_not_matches_all_and_null_operand_is_noop() -> None:
     )
     assert null_operand.errors is None, null_operand.errors  # no crash, no-op
     assert len(null_operand.data["platform_addons"]) == 3
+
+
+def test_camelcase_node_field_is_filtered_by_python_attr() -> None:
+    # A node field with an explicit camelCase wire name: filter/sort must read
+    # the python attribute off the row, not the (absent) wire attribute.
+    @dataclasses.dataclass
+    class _WidgetRow:
+        id: str
+        model_count: int
+
+    @strawberry.type(name="Widget")
+    class Widget:
+        id: strawberry.ID
+        model_count: int = strawberry.field(name="modelCount")
+
+    rows = [_WidgetRow(id="w1", model_count=5)]
+    resource = hasura_run_query_resource(
+        Widget,
+        name="widgets",
+        filterable=["id", "model_count"],
+        sortable=["model_count"],
+        source=InMemoryRowSource(lambda info: rows),
+    )
+    schema = strawberry.Schema(
+        query=resource.query, types=[Widget, *resource.types]
+    )
+    result = schema.execute_sync(
+        "{ widgets(where: {model_count: {_gt: 4}}) { id } }"
+    )
+    assert result.errors is None, result.errors
+    assert [row["id"] for row in result.data["widgets"]] == ["w1"]
+
+
+def _int_id_schema() -> strawberry.Schema:
+    @dataclasses.dataclass
+    class _IntRow:
+        id: int
+        label: str
+
+    @strawberry.type(name="IntThing")
+    class IntThing:
+        id: strawberry.ID
+        label: str
+
+    rows = [_IntRow(id=1, label="one"), _IntRow(id=2, label="two")]
+    resource = hasura_run_query_resource(
+        IntThing,
+        name="int_things",
+        filterable=["id", "label"],
+        sortable=["label"],
+        source=InMemoryRowSource(lambda info: rows),
+    )
+    return strawberry.Schema(
+        query=resource.query, types=[IntThing, *resource.types]
+    )
+
+
+def test_int_id_by_pk_and_eq_filter_agree() -> None:
+    # ``by_pk`` and the list's ``id { _eq }`` must return the same row for a
+    # non-string (int) row id — both coerce the id surface to text.
+    schema = _int_id_schema()
+    by_pk = schema.execute_sync('{ int_things_by_pk(id: "1") { label } }')
+    assert by_pk.errors is None, by_pk.errors
+    assert by_pk.data["int_things_by_pk"]["label"] == "one"
+
+    eq = schema.execute_sync(
+        '{ int_things(where: {id: {_eq: "1"}}) { label } }'
+    )
+    assert eq.errors is None, eq.errors
+    assert [r["label"] for r in eq.data["int_things"]] == ["one"]
+
+    in_ = schema.execute_sync(
+        '{ int_things(where: {id: {_in: ["1", "2"]}}) { id } }'
+    )
+    assert in_.errors is None, in_.errors
+    assert [r["id"] for r in in_.data["int_things"]] == ["1", "2"]
+
+
+def test_cross_type_datetime_comparison_does_not_crash() -> None:
+    # DateTimeComparison maps both date and datetime; a date row vs a datetime
+    # operand is uncomparable and must exclude the row, not crash the query.
+    @dataclasses.dataclass
+    class _EventRow:
+        id: str
+        on: datetime.date
+
+    @strawberry.type(name="Event")
+    class Event:
+        id: strawberry.ID
+        on: datetime.date
+
+    rows = [_EventRow(id="e1", on=datetime.date(2020, 1, 1))]
+    resource = hasura_run_query_resource(
+        Event,
+        name="events",
+        filterable=["id", "on"],
+        sortable=["on"],
+        source=InMemoryRowSource(lambda info: rows),
+    )
+    schema = strawberry.Schema(
+        query=resource.query, types=[Event, *resource.types]
+    )
+    result = schema.execute_sync(
+        '{ events(where: {on: {_gt: "2019-01-01T00:00:00"}}) { id } }'
+    )
+    assert result.errors is None, result.errors
+    assert result.data["events"] == []
+
+
+def test_empty_or_matches_all() -> None:
+    result = _schema().execute_sync(
+        "{ platform_addons(where: {_or: []}) { id } }"
+    )
+    assert result.errors is None, result.errors
+    assert len(result.data["platform_addons"]) == 3
+
+
+def test_unmapped_operator_fails_loud_on_empty_source() -> None:
+    # The fail-fast must fire even with zero rows (a per-row check would not).
+    resource = hasura_run_query_resource(
+        PlatformAddon,
+        name="platform_addons",
+        filterable=["id", "label", "model_count"],
+        sortable=["label", "model_count"],
+        source=InMemoryRowSource(lambda info: []),
+    )
+    schema = strawberry.Schema(
+        query=resource.query, types=[PlatformAddon, *resource.types]
+    )
+    result = schema.execute_sync(
+        '{ platform_addons(where: {label: {_iregex: "x"}}) { id } }'
+    )
+    assert result.errors is not None
+    assert "not supported by the in-memory row source" in str(result.errors[0])
+
+
+def test_id_field_must_be_filterable() -> None:
+    with pytest.raises(TypeError, match="id_field"):
+        hasura_run_query_resource(
+            PlatformAddon,
+            name="platform_addons",
+            filterable=["label"],
+            sortable=["label"],
+            source=InMemoryRowSource(lambda info: _ROWS),
+        )
+
+
+def test_by_pk_pushes_id_predicate_down_and_bounds_to_one() -> None:
+    # by_pk must hand the source an ``id _eq`` where + ``limit=1`` rather
+    # than pulling the whole dataset (``where=None``) and scanning.
+    calls: list[dict[str, Any]] = []
+
+    class _RecordingSource:
+        def query(
+            self,
+            info: strawberry.Info,
+            *,
+            where: Any,
+            order_by: Any,
+            limit: int | None,
+            offset: int | None,
+        ) -> list[Any]:
+            calls.append({"where": where, "limit": limit})
+            return apply_in_memory(
+                _ROWS, where, order_by, limit, offset, id_field="id"
+            )
+
+        def count(self, info: strawberry.Info, *, where: Any) -> int:
+            return len(apply_in_memory(_ROWS, where, None, None, None))
+
+    resource = hasura_run_query_resource(
+        PlatformAddon,
+        name="platform_addons",
+        filterable=["id", "label", "model_count"],
+        sortable=["label", "model_count"],
+        source=_RecordingSource(),
+    )
+    schema = strawberry.Schema(
+        query=resource.query, types=[PlatformAddon, *resource.types]
+    )
+    result = schema.execute_sync(
+        '{ platform_addons_by_pk(id: "storage") { label } }'
+    )
+    assert result.errors is None, result.errors
+    assert result.data["platform_addons_by_pk"]["label"] == "Storage"
+    assert len(calls) == 1
+    assert calls[0]["limit"] == 1
+    assert calls[0]["where"] is not None
+    assert calls[0]["where"].id.eq == "storage"
+
+
+def test_paging_is_stable_over_unordered_source() -> None:
+    # No order_by + a source whose row order differs between requests: the
+    # id_field tiebreaker keeps limit/offset pages deterministic.
+    page_a = apply_in_memory(_ROWS, None, None, 2, 0, id_field="id")
+    page_b = apply_in_memory(
+        list(reversed(_ROWS)), None, None, 2, 0, id_field="id"
+    )
+    assert [r.id for r in page_a] == [r.id for r in page_b]
+
+
+def test_lookup_ops_mirror_filtering_lookups() -> None:
+    assert set(_LOOKUP_OPS) == PORTABLE_LOOKUPS
