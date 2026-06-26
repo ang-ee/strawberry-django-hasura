@@ -100,6 +100,36 @@ def test_list_ilike_and_limit_offset() -> None:
     assert [row["id"] for row in result.data["platform_addons"]] == ["storage"]
 
 
+def test_list_ilike_accepts_refine_contains_wildcard_pattern() -> None:
+    result = _schema().execute_sync(
+        """
+        query {
+          platform_addons(
+            where: {label: {_ilike: "%s%"}}
+            order_by: [{label: asc}]
+          ) { id }
+        }
+        """
+    )
+    assert result.errors is None, result.errors
+    assert [row["id"] for row in result.data["platform_addons"]] == [
+        "notes",
+        "storage",
+    ]
+
+
+def test_list_ilike_accepts_hasura_prefix_pattern() -> None:
+    result = _schema().execute_sync(
+        """
+        query {
+          platform_addons(where: {label: {_ilike: "sto%"}}) { id }
+        }
+        """
+    )
+    assert result.errors is None, result.errors
+    assert [row["id"] for row in result.data["platform_addons"]] == ["storage"]
+
+
 def test_by_pk() -> None:
     result = _schema().execute_sync(
         'query { platform_addons_by_pk(id: "storage") { id label } }'

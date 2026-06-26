@@ -46,8 +46,12 @@ refine's `hasuraFilterOperatorMappings` sends `eq→_eq`, `ne→_neq`,
 `lt/gt/lte/gte`, `in→_in`, `nin→_nin`, `contains→_ilike`, `containss→_like`,
 `null/nnull→_is_null` (+ Postgres regex/similar for `startswith`/`endswith`).
 Maps to Django `Q`: `_eq→exact`, `_neq→~exact`, `_in→in`, `_nin→~in`,
-`_like→contains`, `_ilike→icontains`, `_gt→gt`, …, `_is_null:true→isnull`;
-JSON `_contains` maps to Django `JSONField__contains`.
+`_like`/`_ilike` accept Hasura SQL-LIKE patterns and map common
+leading/trailing `%` forms to portable `contains`/`startswith`/`endswith`
+lookups (`contains` from stock refine arrives as `_ilike: "%term%"`),
+`_gt→gt`, …, `_is_null:true→isnull`; JSON `_contains` maps to Django
+`JSONField__contains`. A raw `_like`/`_ilike` value without `%` is also treated
+as a substring shorthand for authored callers.
 
 The portable operators are mapped in the default `filtering._LOOKUPS`; the
 Postgres-only `_iregex`/`_similar`/`_nsimilar` are accepted in the SDL but

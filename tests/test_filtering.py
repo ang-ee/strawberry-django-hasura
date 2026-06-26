@@ -70,6 +70,18 @@ def test_mapped_operator_builds_the_expected_lookup():
     assert ("title__icontains", "a") in q.children
 
 
+def test_ilike_accepts_refine_contains_wildcard_pattern():
+    q = comparison_to_q("title", StringComparison(ilike="%a%"))
+    assert ("title__icontains", "a") in q.children
+
+
+def test_ilike_accepts_hasura_prefix_and_suffix_patterns():
+    prefix = comparison_to_q("title", StringComparison(ilike="Al%"))
+    suffix = comparison_to_q("title", StringComparison(ilike="%ha"))
+    assert ("title__istartswith", "Al") in prefix.children
+    assert ("title__iendswith", "ha") in suffix.children
+
+
 def test_json_contains_operator_builds_the_expected_lookup():
     q = comparison_to_q("metadata", JSONComparison(contains={"kind": "note"}))
     assert ("metadata__contains", {"kind": "note"}) in q.children

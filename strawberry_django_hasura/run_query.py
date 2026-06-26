@@ -36,7 +36,7 @@ from strawberry.types import get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
 
 from .comparisons import IDComparison
-from .filtering import PORTABLE_LOOKUPS
+from .filtering import PORTABLE_LOOKUPS, hasura_like_matches
 from .inputs import (
     ID_WIRE_NAME,
     build_bool_exp,
@@ -98,15 +98,29 @@ _LOOKUP_OPS: dict[str, Callable[[Any, Any], bool]] = {
     # ``col LIKE x`` is unknown for NULL → excluded); the negated family does
     # match NULL (verified: Django's ``filter(~Q(col__contains=x))`` returns
     # NULL rows, the same three-valued logic as ``_neq`` / ``_nin``).
-    "like": lambda value, operand: (
-        value is not None and operand in _as_text(value)
+    "like": lambda value, operand: hasura_like_matches(
+        value,
+        operand,
+        case_sensitive=True,
     ),
-    "nlike": lambda value, operand: operand not in _as_text(value),
-    "ilike": lambda value, operand: (
-        value is not None and operand.lower() in _as_text(value).lower()
+    "nlike": lambda value, operand: (
+        not hasura_like_matches(
+            value,
+            operand,
+            case_sensitive=True,
+        )
+    ),
+    "ilike": lambda value, operand: hasura_like_matches(
+        value,
+        operand,
+        case_sensitive=False,
     ),
     "nilike": lambda value, operand: (
-        operand.lower() not in _as_text(value).lower()
+        not hasura_like_matches(
+            value,
+            operand,
+            case_sensitive=False,
+        )
     ),
     "contains": lambda value, operand: _json_contains(value, operand),
 }

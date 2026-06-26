@@ -228,6 +228,21 @@ def test_string_ilike(schema, seeded_notes):
     assert len(result.data["notes"]) == 2
 
 
+def test_string_ilike_accepts_refine_contains_wildcard_pattern(
+    schema,
+    seeded_notes,
+):
+    result = schema.execute_sync(
+        "query($w: notes_bool_exp){ notes(where:$w){ title } }",
+        variable_values={"w": {"title": {"_ilike": "%a%"}}},
+    )
+    assert result.errors is None, result.errors
+    assert {row["title"] for row in result.data["notes"]} == {
+        "Alpha",
+        "Bravo",
+    }
+
+
 def test_by_pk(schema, seeded_notes):
     first = seeded_notes.objects.order_by("pk").first()
     sqid = encode_sqid(first.pk)

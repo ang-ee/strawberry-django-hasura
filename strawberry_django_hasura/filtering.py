@@ -16,6 +16,7 @@ never inspects the value to guess whether it is a sqid (see ``AGENTS.md``).
 from __future__ import annotations
 
 import dataclasses
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -60,6 +61,103 @@ _AND = "and_"
 _OR = "or_"
 _NOT = "not_"
 _BOOL = {_AND, _OR, _NOT}
+_LIKE_ATTRS = {"like", "nlike", "ilike", "nilike"}
+
+
+def hasura_like_lookup(
+    operand: Any,
+    *,
+    case_sensitive: bool,
+) -> tuple[str, Any]:
+    """Return the Django lookup for one Hasura ``LIKE`` operand.
+
+    The stock refine Hasura provider sends ``contains`` as ``_ilike: "%x%"``.
+    Older Angee-authored operations sent raw substrings (``_ilike: "x"``).
+    Support both shapes: simple leading/trailing ``%`` maps to portable string
+    lookups, while complex SQL-LIKE patterns fall back to Django's regex
+    lookup.
+    """
+    lookup, value = _portable_like_lookup(str(operand), case_sensitive)
+    if lookup is not None:
+        return lookup, value
+    return (
+        "__regex" if case_sensitive else "__iregex",
+        _like_pattern_to_regex(str(operand)),
+    )
+
+
+def hasura_like_matches(
+    value: Any,
+    operand: Any,
+    *,
+    case_sensitive: bool,
+) -> bool:
+    """Evaluate one Hasura ``LIKE`` operand against an in-memory value."""
+    if value is None:
+        return False
+    pattern = str(operand)
+    lookup, needle = _portable_like_lookup(pattern, case_sensitive)
+    text = str(value)
+    if not case_sensitive:
+        text = text.lower()
+        needle = str(needle).lower()
+    if lookup is None:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        return (
+            re.match(_like_pattern_to_regex(pattern), str(value), flags)
+            is not None
+        )
+    if lookup.endswith("contains"):
+        return str(needle) in text
+    if lookup.endswith("startswith"):
+        return text.startswith(str(needle))
+    if lookup.endswith("endswith"):
+        return text.endswith(str(needle))
+    raise AssertionError(f"unsupported portable LIKE lookup {lookup!r}")
+
+
+def _portable_like_lookup(
+    pattern: str,
+    case_sensitive: bool,
+) -> tuple[str | None, str]:
+    if "_" in pattern or "\\" in pattern:
+        return None, pattern
+    prefix = "__" if case_sensitive else "__i"
+    count = pattern.count("%")
+    if count == 0:
+        # Backward-compatible shorthand used by authored Angee operations.
+        return f"{prefix}contains", pattern
+    if count == 1:
+        if pattern.startswith("%"):
+            return f"{prefix}endswith", pattern[1:]
+        if pattern.endswith("%"):
+            return f"{prefix}startswith", pattern[:-1]
+    if count == 2 and pattern.startswith("%") and pattern.endswith("%"):
+        inner = pattern[1:-1]
+        if "%" not in inner:
+            return f"{prefix}contains", inner
+    return None, pattern
+
+
+def _like_pattern_to_regex(pattern: str) -> str:
+    parts = ["^"]
+    escaped = False
+    for char in pattern:
+        if escaped:
+            parts.append(re.escape(char))
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "%":
+            parts.append(".*")
+        elif char == "_":
+            parts.append(".")
+        else:
+            parts.append(re.escape(char))
+    if escaped:
+        parts.append(re.escape("\\"))
+    parts.append("$")
+    return "".join(parts)
 
 
 def comparison_to_q(
@@ -90,6 +188,11 @@ def comparison_to_q(
                 [decode(v) for v in val]
                 if attr in {"in_", "nin"}
                 else (decode(val))
+            )
+        if attr in _LIKE_ATTRS:
+            suffix, val = hasura_like_lookup(
+                val,
+                case_sensitive=attr in {"like", "nlike"},
             )
         clause = Q(**{f"{field}{suffix}": val})
         q &= ~clause if negate else clause

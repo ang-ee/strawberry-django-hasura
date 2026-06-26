@@ -5,6 +5,20 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-06-26
+
+### Fixed
+
+- **`_like` / `_ilike` now interpret Hasura SQL-`LIKE` patterns** instead of
+  matching the pattern as a literal substring. The stock `@refinedev/hasura`
+  provider sends `contains` as `_ilike: "%term%"`; the previous mapping looked
+  for the literal `%term%` (percent signs and all). Leading/trailing `%` now map
+  to portable `contains` / `startswith` / `endswith` lookups, a bare value
+  (no `%`) stays a substring shorthand for authored callers, and any richer
+  SQL-`LIKE` pattern (`_` wildcard, embedded `%`, `\` escapes) falls back to
+  Django's `regex` / `iregex`. Applied on both the model path (`filtering.py`)
+  and the in-memory `run_query` evaluator so the two siblings stay in lockstep.
+
 ## [0.3.0] — 2026-06-25
 
 ### Added
@@ -114,5 +128,6 @@ for the target SDL and [`AGENTS.md`](./AGENTS.md) for the architecture.
   schema built with this library, and an in-memory SQLite test suite covering
   every surface plus the emitted-SDL contract.
 
+[0.3.1]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.3.1
 [0.2.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.1.0
