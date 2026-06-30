@@ -42,6 +42,7 @@ from django.db.models import Model, QuerySet
 from strawberry import UNSET
 from strawberry.types import get_object_definition
 from strawberry_django.fields.types import field_type_map
+from strawberry_django.optimizer import optimize
 from strawberry_django_aggregates import AggregateBuilder
 
 from .aggregation import make_aggregate_resolver
@@ -468,9 +469,9 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         order_by: Any = None,
         limit: int | None = None,
         offset: int | None = None,
-    ) -> list[Any]:
+    ) -> Any:
         qs = apply_ordering(filtered(info, where), order_by)
-        return list(paginate(qs, limit, offset))
+        return paginate(qs, limit, offset)
 
     resolve_list.__annotations__ = {
         "self": Any,
@@ -496,7 +497,15 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
 
     def resolve_by_pk(self: Any, info: strawberry.Info, id: str) -> Any | None:
         lookup = id_decode(id) if id_decode is not None else id
-        return get_queryset(info).filter(**{id_column: lookup}).first()
+        qs = get_queryset(info).filter(**{id_column: lookup})
+        # Lean on strawberry-django's optimizer for the single row's nested
+        # selections too. ``.first()`` evaluates eagerly, so — unlike the list
+        # / ``nodes`` resolvers, whose lazy queryset the optimizer extension
+        # auto-optimizes — by_pk must compose ``optimize()`` itself or its
+        # relations N+1. ``optimize`` is a standalone primitive (it applies the
+        # same select_related / prefetch / ``.only()`` hints with or without
+        # the extension installed): it composes the wheel, never reinvents it.
+        return optimize(qs, info).first()
 
     resolve_by_pk.__annotations__ = {
         "self": Any,

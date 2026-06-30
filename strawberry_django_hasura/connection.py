@@ -84,7 +84,7 @@ def make_aggregate_container(
 
     def resolve_nodes(self: Any, info: strawberry.Info) -> Any:
         source = filtered_nodes_queryset or filtered_queryset
-        return list(source(info, self.where))
+        return source(info, self.where)
 
     resolve_nodes.__annotations__ = {
         "self": Any,

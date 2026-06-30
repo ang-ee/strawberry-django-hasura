@@ -5,6 +5,24 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-06-30
+
+### Fixed
+
+- **The read resolvers now lean on strawberry-django's
+  `DjangoOptimizerExtension`** instead of N+1-ing nested relations. The list and
+  `<res>_aggregate { nodes }` resolvers returned `list(...)`, which evaluated the
+  queryset before the optimizer's `_result_cache is None` gate — so a consumer
+  with the extension installed still saw nested loads scale with the row count.
+  They now return the lazy queryset and the extension collapses nested relations
+  to a constant query count (`select_related` + `prefetch_related` + `.only()`).
+- **`<res>_by_pk` composes `optimize()`** so the single row's nested selections
+  are optimized too. `.first()` evaluates eagerly (the extension only
+  auto-optimizes a returned queryset), so a `by_pk { author { … } }` selection
+  was a separate SELECT per to-one relation; it is now folded into the row's own
+  JOIN. `optimize()` is composed, not reimplemented — and works with or without
+  the extension installed.
+
 ## [0.3.1] — 2026-06-26
 
 ### Fixed
@@ -128,6 +146,7 @@ for the target SDL and [`AGENTS.md`](./AGENTS.md) for the architecture.
   schema built with this library, and an in-memory SQLite test suite covering
   every surface plus the emitted-SDL contract.
 
+[0.3.2]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.3.2
 [0.3.1]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.3.1
 [0.2.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.1.0
