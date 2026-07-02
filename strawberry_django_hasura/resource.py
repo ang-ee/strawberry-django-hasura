@@ -104,7 +104,10 @@ class HasuraResource:
     The role-named members expose facts the builder already had while
     assembling the surface. Consumers that need "the filter type" or "the
     insert root name" should read them from the built resource instead of
-    re-templating Hasura's naming convention.
+    re-templating Hasura's naming convention. ``aggregate_container_type`` is
+    the Hasura ``<res>_aggregate`` wrapper; ``aggregate_type`` is its inner
+    ``aggregate`` payload (the native ``<Model>Aggregate`` on the model path,
+    the count-only ``<Node>Aggregate`` on the row-source path).
     """
 
     query: type
@@ -117,8 +120,13 @@ class HasuraResource:
     insert_input_type: type | None = None
     set_input_type: type | None = None
     pk_columns_input_type: type | None = None
+    aggregate_container_type: type | None = None
     aggregate_type: type | None = None
+    group_type: type | None = None
     group_key_type: type | None = None
+    group_by_spec_type: type | None = None
+    group_order_type: type | None = None
+    having_type: type | None = None
     list_root: str | None = None
     aggregate_root: str | None = None
     detail_root: str | None = None
@@ -467,7 +475,11 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     )
     groups_field: Any = None
     groups_types: list[type] = []
+    group_type: type | None = None
     group_key_type: type | None = None
+    group_by_spec_type: type | None = None
+    group_order_type: type | None = None
+    having_type: type | None = None
     if groupable:
         groups_field, groups_types = make_groups_field(
             builder=agg_builder,
@@ -485,7 +497,11 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         # ``order_by`` INPUT types (e.g. ``count_gt`` would camelCase).
         for grouped in groups_types:
             _pin_snake_wire_names(grouped)
+        group_type = groups_types[0]
         group_key_type = cast("type", agg_built.group_key_type)
+        group_by_spec_type = groups_types[2]
+        having_type = groups_types[3]
+        group_order_type = groups_types[4]
 
     # --- root query fields ---------------------------------------------------
     def resolve_list(
@@ -665,8 +681,13 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         insert_input_type=insert_input,
         set_input_type=set_input,
         pk_columns_input_type=pk_columns_input,
+        aggregate_container_type=container,
         aggregate_type=aggregate_type,
+        group_type=group_type,
         group_key_type=group_key_type,
+        group_by_spec_type=group_by_spec_type,
+        group_order_type=group_order_type,
+        having_type=having_type,
         list_root=list_root,
         aggregate_root=aggregate_root,
         detail_root=detail_root,

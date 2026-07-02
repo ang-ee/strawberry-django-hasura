@@ -22,8 +22,15 @@ def test_model_resource_exposes_role_named_types_and_roots():
     assert _graphql_name(resource.pk_columns_input_type) == (
         "notes_pk_columns_input"
     )
+    assert _graphql_name(resource.aggregate_container_type) == (
+        "notes_aggregate"
+    )
     assert _graphql_name(resource.aggregate_type) == "NoteAggregate"
+    assert _graphql_name(resource.group_type) == "notes_group"
     assert _graphql_name(resource.group_key_type) == "NoteGroupKey"
+    assert _graphql_name(resource.group_by_spec_type) == "NoteGroupBySpec"
+    assert _graphql_name(resource.group_order_type) == "NoteGroupOrder"
+    assert _graphql_name(resource.having_type) == "NoteHaving"
 
     assert resource.list_root == "notes"
     assert resource.aggregate_root == "notes_aggregate"

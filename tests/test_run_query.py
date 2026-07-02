@@ -78,11 +78,18 @@ def test_run_query_resource_exposes_role_metadata() -> None:
     assert resource.node_type is PlatformAddon
     assert _graphql_name(resource.filter_type) == "platform_addons_bool_exp"
     assert _graphql_name(resource.order_by_type) == "platform_addons_order_by"
+    assert _graphql_name(resource.aggregate_container_type) == (
+        "platform_addons_aggregate"
+    )
     assert _graphql_name(resource.aggregate_type) == "PlatformAddonAggregate"
     assert resource.insert_input_type is None
     assert resource.set_input_type is None
     assert resource.pk_columns_input_type is None
+    assert resource.group_type is None
     assert resource.group_key_type is None
+    assert resource.group_by_spec_type is None
+    assert resource.group_order_type is None
+    assert resource.having_type is None
     assert resource.list_root == "platform_addons"
     assert resource.aggregate_root == "platform_addons_aggregate"
     assert resource.detail_root == "platform_addons_by_pk"

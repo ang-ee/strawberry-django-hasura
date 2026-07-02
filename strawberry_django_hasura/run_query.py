@@ -664,6 +664,7 @@ def hasura_run_query_resource(
         node_type=node,
         filter_type=bool_exp,
         order_by_type=order_by_input,
+        aggregate_container_type=container,
         aggregate_type=count_type,
         list_root=list_root,
         aggregate_root=aggregate_root,

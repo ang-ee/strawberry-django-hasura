@@ -5,6 +5,23 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-07-02
+
+### Added
+
+- **`HasuraResource` now exposes role-named generated types and root names**
+  so consumers can read the built surface directly instead of re-templating the
+  Hasura naming convention. Model resources expose `node_type`,
+  `filter_type`, `order_by_type`, `insert_input_type`, `set_input_type`,
+  `pk_columns_input_type`, `aggregate_container_type`, `aggregate_type`,
+  `group_type`, `group_key_type`, `group_by_spec_type`, `group_order_type`,
+  `having_type`, all root field names, and the builder-decided write facts
+  (`enabled_operations`, `insertable_fields`, `updatable_fields`). The
+  read-only `hasura_run_query_resource(...)` path exposes the matching read
+  roles. `aggregate_container_type` is the Hasura `<res>_aggregate` wrapper;
+  `aggregate_type` remains the inner `aggregate` payload (`<Model>Aggregate` on
+  the model path, count-only `<Node>Aggregate` on the row-source path).
+
 ## [0.3.2] — 2026-06-30
 
 ### Fixed
@@ -146,6 +163,7 @@ for the target SDL and [`AGENTS.md`](./AGENTS.md) for the architecture.
   schema built with this library, and an in-memory SQLite test suite covering
   every surface plus the emitted-SDL contract.
 
+[0.4.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.4.0
 [0.3.2]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.3.2
 [0.3.1]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.3.1
 [0.2.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.2.0
