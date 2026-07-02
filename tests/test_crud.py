@@ -395,6 +395,15 @@ def test_mutation_operations_can_be_disabled(seeded_notes):
     assert "insert_patch_notes_one" not in sdl
     assert "delete_patch_notes_by_pk" not in sdl
     assert "patch_notes_insert_input" not in sdl
+    assert resource.enabled_operations == ("update",)
+    assert resource.insert_input_type is None
+    assert resource.set_input_type is not None
+    assert resource.pk_columns_input_type is not None
+    assert resource.insert_one_root is None
+    assert resource.update_by_pk_root == "update_patch_notes_by_pk"
+    assert resource.delete_by_pk_root is None
+    assert resource.insertable_fields == ()
+    assert resource.updatable_fields == ("title",)
 
 
 def test_insert_and_update_allowlists_can_differ(seeded_notes):

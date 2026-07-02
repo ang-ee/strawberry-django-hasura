@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 import strawberry
+from strawberry.types import get_object_definition
 
 from strawberry_django_hasura import (
     InMemoryRowSource,
@@ -57,6 +58,36 @@ def _schema() -> strawberry.Schema:
     return strawberry.Schema(
         query=resource.query, types=[PlatformAddon, *resource.types]
     )
+
+
+def _graphql_name(strawberry_type: type) -> str:
+    definition = get_object_definition(strawberry_type)
+    assert definition is not None
+    return definition.name
+
+
+def test_run_query_resource_exposes_role_metadata() -> None:
+    resource = hasura_run_query_resource(
+        PlatformAddon,
+        name="platform_addons",
+        filterable=["id", "label", "model_count"],
+        sortable=["label", "model_count"],
+        source=InMemoryRowSource(lambda info: _ROWS),
+    )
+
+    assert resource.node_type is PlatformAddon
+    assert _graphql_name(resource.filter_type) == "platform_addons_bool_exp"
+    assert _graphql_name(resource.order_by_type) == "platform_addons_order_by"
+    assert _graphql_name(resource.aggregate_type) == "PlatformAddonAggregate"
+    assert resource.insert_input_type is None
+    assert resource.set_input_type is None
+    assert resource.pk_columns_input_type is None
+    assert resource.group_key_type is None
+    assert resource.list_root == "platform_addons"
+    assert resource.aggregate_root == "platform_addons_aggregate"
+    assert resource.detail_root == "platform_addons_by_pk"
+    assert resource.groups_root is None
+    assert resource.enabled_operations == ()
 
 
 def test_list_filter_sort_and_aggregate_count() -> None:

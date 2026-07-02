@@ -638,13 +638,16 @@ def hasura_run_query_resource(
         "return": node | None,
     }
 
+    list_root = res
+    aggregate_root = f"{res}_aggregate"
+    detail_root = f"{res}_by_pk"
     query_fields = {
-        res: strawberry.field(resolver=resolve_list, name=res),
-        f"{res}_aggregate": strawberry.field(
-            resolver=resolve_aggregate, name=f"{res}_aggregate"
+        list_root: strawberry.field(resolver=resolve_list, name=list_root),
+        aggregate_root: strawberry.field(
+            resolver=resolve_aggregate, name=aggregate_root
         ),
-        f"{res}_by_pk": strawberry.field(
-            resolver=resolve_by_pk, name=f"{res}_by_pk"
+        detail_root: strawberry.field(
+            resolver=resolve_by_pk, name=detail_root
         ),
     }
     query = strawberry.type(type(f"{res}__query", (), query_fields))
@@ -657,4 +660,12 @@ def hasura_run_query_resource(
         query=query,
         mutation=mutation,
         types=[container, count_type, bool_exp, order_by_input],
+        name=res,
+        node_type=node,
+        filter_type=bool_exp,
+        order_by_type=order_by_input,
+        aggregate_type=count_type,
+        list_root=list_root,
+        aggregate_root=aggregate_root,
+        detail_root=detail_root,
     )

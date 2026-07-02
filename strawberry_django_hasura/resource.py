@@ -100,11 +100,35 @@ class HasuraResource:
     schema bucket merges these as the hand-wired resource exposed them.
     A read-only resource (all of insert/update/delete disabled) carries an
     empty mutation holder — it merges to nothing.
+
+    The role-named members expose facts the builder already had while
+    assembling the surface. Consumers that need "the filter type" or "the
+    insert root name" should read them from the built resource instead of
+    re-templating Hasura's naming convention.
     """
 
     query: type
     mutation: type
     types: list[type]
+    name: str | None = None
+    node_type: type | None = None
+    filter_type: type | None = None
+    order_by_type: type | None = None
+    insert_input_type: type | None = None
+    set_input_type: type | None = None
+    pk_columns_input_type: type | None = None
+    aggregate_type: type | None = None
+    group_key_type: type | None = None
+    list_root: str | None = None
+    aggregate_root: str | None = None
+    detail_root: str | None = None
+    groups_root: str | None = None
+    insert_one_root: str | None = None
+    update_by_pk_root: str | None = None
+    delete_by_pk_root: str | None = None
+    enabled_operations: tuple[str, ...] = ()
+    insertable_fields: tuple[str, ...] = ()
+    updatable_fields: tuple[str, ...] = ()
 
 
 def _column_python_type(field: Any) -> Any:
@@ -443,6 +467,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     )
     groups_field: Any = None
     groups_types: list[type] = []
+    group_key_type: type | None = None
     if groupable:
         groups_field, groups_types = make_groups_field(
             builder=agg_builder,
@@ -460,6 +485,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         # ``order_by`` INPUT types (e.g. ``count_gt`` would camelCase).
         for grouped in groups_types:
             _pin_snake_wire_names(grouped)
+        group_key_type = cast("type", agg_built.group_key_type)
 
     # --- root query fields ---------------------------------------------------
     def resolve_list(
@@ -514,23 +540,36 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         "return": node | None,
     }
 
+    list_root = res
+    aggregate_root = f"{res}_aggregate"
+    detail_root = f"{res}_by_pk"
+    groups_root = f"{res}_groups" if groups_field is not None else None
+
     query_fields = {
-        res: strawberry.field(resolver=resolve_list, name=res),
-        f"{res}_aggregate": strawberry.field(
-            resolver=resolve_aggregate, name=f"{res}_aggregate"
+        list_root: strawberry.field(resolver=resolve_list, name=list_root),
+        aggregate_root: strawberry.field(
+            resolver=resolve_aggregate, name=aggregate_root
         ),
-        f"{res}_by_pk": strawberry.field(
-            resolver=resolve_by_pk, name=f"{res}_by_pk"
+        detail_root: strawberry.field(
+            resolver=resolve_by_pk, name=detail_root
         ),
     }
-    if groups_field is not None:
-        query_fields[f"{res}_groups"] = groups_field
+    if groups_field is not None and groups_root is not None:
+        query_fields[groups_root] = groups_field
     query = strawberry.type(type(f"{res}__query", (), query_fields))
 
     # --- root mutation fields ------------------------------------------------
     mutation_fields: dict[str, Any] = {}
+    insert_one_root = f"insert_{res}_one" if "insert" in operations else None
+    update_by_pk_root = (
+        f"update_{res}_by_pk" if "update" in operations else None
+    )
+    delete_by_pk_root = (
+        f"delete_{res}_by_pk" if "delete" in operations else None
+    )
     if "insert" in operations:
         assert insert_input is not None
+        assert insert_one_root is not None
 
         def resolve_insert(
             self: Any,
@@ -545,13 +584,14 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             "object": insert_input,
             "return": node,
         }
-        mutation_fields[f"insert_{res}_one"] = strawberry.mutation(
+        mutation_fields[insert_one_root] = strawberry.mutation(
             resolver=resolve_insert,
-            name=f"insert_{res}_one",
+            name=insert_one_root,
         )
     if "update" in operations:
         assert pk_columns_input is not None
         assert set_input is not None
+        assert update_by_pk_root is not None
 
         def resolve_update(
             self: Any, info: strawberry.Info, pk_columns: Any, _set: Any
@@ -569,11 +609,12 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             "_set": set_input,
             "return": node,
         }
-        mutation_fields[f"update_{res}_by_pk"] = strawberry.mutation(
+        mutation_fields[update_by_pk_root] = strawberry.mutation(
             resolver=resolve_update,
-            name=f"update_{res}_by_pk",
+            name=update_by_pk_root,
         )
     if "delete" in operations:
+        assert delete_by_pk_root is not None
 
         def resolve_delete(
             self: Any, info: strawberry.Info, id: str
@@ -586,9 +627,9 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             "id": str,
             "return": node | None,
         }
-        mutation_fields[f"delete_{res}_by_pk"] = strawberry.mutation(
+        mutation_fields[delete_by_pk_root] = strawberry.mutation(
             resolver=resolve_delete,
-            name=f"delete_{res}_by_pk",
+            name=delete_by_pk_root,
         )
 
     # A read-only resource (no enabled operations) yields an empty mutation
@@ -617,4 +658,27 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             )
             if item is not None
         ],
+        name=res,
+        node_type=node,
+        filter_type=bool_exp,
+        order_by_type=order_by_input,
+        insert_input_type=insert_input,
+        set_input_type=set_input,
+        pk_columns_input_type=pk_columns_input,
+        aggregate_type=aggregate_type,
+        group_key_type=group_key_type,
+        list_root=list_root,
+        aggregate_root=aggregate_root,
+        detail_root=detail_root,
+        groups_root=groups_root,
+        insert_one_root=insert_one_root,
+        update_by_pk_root=update_by_pk_root,
+        delete_by_pk_root=delete_by_pk_root,
+        enabled_operations=operations,
+        insertable_fields=(
+            tuple(field.name for field in insert_fields) if insert else ()
+        ),
+        updatable_fields=(
+            tuple(field.name for field in set_fields) if update else ()
+        ),
     )
