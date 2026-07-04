@@ -21,7 +21,12 @@ from .filtering import comparison_to_q, where_to_q
 from .mutations import input_to_dict
 from .naming import SnakeNameConverter, hasura_config
 from .ordering import OrderBy, apply_ordering, order_clauses
-from .resource import HasuraResource, WriteBackend, hasura_resource
+from .resource import (
+    HasuraResource,
+    NestedInsert,
+    WriteBackend,
+    hasura_resource,
+)
 from .run_query import (
     InMemoryRowSource,
     RowSource,
@@ -33,6 +38,7 @@ from .run_query import (
 __all__ = [
     "HasuraResource",
     "InMemoryRowSource",
+    "NestedInsert",
     "OrderBy",
     "RowSource",
     "SnakeNameConverter",

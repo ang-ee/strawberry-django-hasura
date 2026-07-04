@@ -55,4 +55,29 @@ class BookModel(models.Model):
         app_label = "tests"
 
 
-__all__ = ["AuthorModel", "BookModel", "NoteModel", "TagModel"]
+class ChapterModel(models.Model):
+    """A to-many child of ``BookModel`` — the nested-insert array relation.
+
+    ``related_name="chapters"`` is the parent's reverse accessor a
+    :class:`~strawberry_django_hasura.NestedInsert` declares; ``title`` has a
+    ``max_length`` short enough for a test to force a child validation failure
+    and prove the whole nested insert rolls back.
+    """
+
+    book = models.ForeignKey(
+        BookModel, on_delete=models.CASCADE, related_name="chapters"
+    )
+    title = models.CharField(max_length=20)
+    position = models.IntegerField(default=0)
+
+    class Meta:
+        app_label = "tests"
+
+
+__all__ = [
+    "AuthorModel",
+    "BookModel",
+    "ChapterModel",
+    "NoteModel",
+    "TagModel",
+]

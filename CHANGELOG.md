@@ -9,6 +9,28 @@ and this project adheres to
 
 ### Added
 
+- **Nested object insert for declared to-many relations.** `hasura_resource`
+  gains a `nested=[NestedInsert(relation="lines", model=LineModel)]` knob that
+  exposes the Hasura array-relationship insert shape —
+  `insert_<res>_one(object: {..., lines: {data: [<child>...]}})`. Each declared
+  relation contributes a child row input (`<res>_<relation>_insert_input`) built
+  from the child model's editable columns and its `{data: [...]}` envelope
+  (`<res>_<relation>_arr_rel_insert_input`), plus an optional field on the
+  parent `<res>_insert_input`. The child's foreign key back to the parent is
+  excluded (the nesting supplies it), and the child input carries an **optional
+  public `id`** with every column optional, so the one input drives both the
+  nested insert (`id` omitted → a new child) and a consumer's authored
+  upsert/diff `_save` operation (`id` present → an existing child). The built
+  `HasuraResource` exposes `nested_inserts`, `nested_input_types`, and
+  `nested_arr_input_types` so a consumer can reuse the child input for its own
+  mutation. `NestedInsert` is a new public export.
+- **`input_to_dict` recurses through nested input objects.** It now reduces the
+  `{data: [...]}` envelope (and any nested input) to plain nested dicts so the
+  caller's `write_backend` receives ready-to-persist kwargs, never a
+  half-decoded strawberry input instance. A list of scalar operands (an m2m
+  `[ID!]` array) is left untouched. Persistence and atomicity stay the
+  `write_backend`'s concern — the library owns the input shape only.
+
 - **`Decimal_comparison_exp` — exact fixed-point filtering.** A `DecimalField`
   column now filters through a new `DecimalComparison` (`comparisons.py`) whose
   operands are strawberry `Decimal` scalars (exact strings on the wire), across

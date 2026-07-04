@@ -35,6 +35,7 @@ from __future__ import annotations
 import types
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Any, Protocol, cast
 
 import strawberry
@@ -92,6 +93,43 @@ class WriteBackend(Protocol):
 
 
 @dataclass(frozen=True)
+class NestedInsert:
+    """A declared to-many child relation exposed as a Hasura nested insert.
+
+    Hasura writes a parent and its array-relationship children in one
+    ``insert_<res>_one(object: {..., <relation>: {data: [<child>...]}})``
+    envelope, atomically. This declares one such relation for
+    :func:`hasura_resource`:
+
+    - ``relation`` is the parent's reverse-FK accessor (``"lines"``); the
+      child's foreign key back to the parent is derived from it and
+      **excluded** from the child row input (the nesting supplies it).
+    - ``model`` is the child Django model whose editable columns shape the
+      child row input (``insertable`` overrides the auto allowlist, mirroring
+      the top-level ``insertable`` knob).
+    - ``field_id_decode`` marks child columns whose operands are public ids
+      (typed ``ID`` in the input), mirroring the top-level ``field_id_decode``.
+    - ``name`` overrides the child input type stem (default
+      ``f"{res}_{relation}"``).
+
+    The generated child row input carries an **optional public ``id``** and
+    every column is optional, so the one input drives both the nested insert
+    (``id`` omitted → a new child) and a consumer's authored upsert/diff
+    ``_save`` operation (``id`` present → an existing child). Persistence stays
+    the caller's ``write_backend`` concern: ``input_to_dict`` reduces the
+    ``{data: [...]}`` envelope to plain nested dicts and hands them to
+    ``create`` — the backend writes parent + children in one transaction and
+    rolls back on a child failure.
+    """
+
+    relation: str
+    model: type[Model]
+    name: str | None = None
+    insertable: list[str] | None = None
+    field_id_decode: Mapping[str, Callable[[Any], Any]] | None = None
+
+
+@dataclass(frozen=True)
 class HasuraResource:
     """The assembled Hasura surface for one model — drop into a schema bucket.
 
@@ -137,6 +175,13 @@ class HasuraResource:
     enabled_operations: tuple[str, ...] = ()
     insertable_fields: tuple[str, ...] = ()
     updatable_fields: tuple[str, ...] = ()
+    nested_inserts: tuple[NestedInsert, ...] = ()
+    nested_input_types: Mapping[str, type] = dataclass_field(
+        default_factory=dict
+    )
+    nested_arr_input_types: Mapping[str, type] = dataclass_field(
+        default_factory=dict
+    )
 
 
 def _column_python_type(field: Any) -> Any:
@@ -265,6 +310,65 @@ def _enabled_operations(
     )
 
 
+def _optional_on_insert(column: Any) -> bool:
+    """Return whether a writable column may be omitted from an insert input."""
+
+    return (
+        column.has_default()
+        or getattr(column, "null", False)
+        or getattr(column, "blank", False)
+    )
+
+
+def _insert_input_type(
+    name: str,
+    fields: list[Any],
+    public_id_fields: frozenset[str],
+    module: types.ModuleType,
+    *,
+    with_public_id: bool = False,
+    extra: Mapping[str, type] | None = None,
+) -> type:
+    """Build a ``<name>_insert_input`` from a model's writable fields.
+
+    Shared by the parent insert input and each nested child row input. A
+    concrete column with a Django default / null / blank is optional.
+    ``with_public_id`` prepends an optional public ``id`` (the upsert key) and
+    makes every column optional, so the one child input serves both the nested
+    insert (``id`` omitted) and a consumer's upsert diff (``id`` present).
+    ``extra`` adds the already-built nested array-relation envelope fields
+    (always optional) to the parent input.
+    """
+
+    annotations: dict[str, Any] = {}
+    defaults: dict[str, Any] = {}
+    if with_public_id:
+        annotations["id"] = str | None
+        defaults["id"] = UNSET
+    for column in fields:
+        python_type = _writable_python_type(
+            column,
+            public_id=column.name in public_id_fields,
+        )
+        optional = with_public_id or _optional_on_insert(column)
+        annotations[column.name] = (
+            python_type | None if optional else python_type
+        )
+        if optional:
+            defaults[column.name] = UNSET
+    for attr, attr_type in (extra or {}).items():
+        annotations[attr] = attr_type | None
+        defaults[attr] = UNSET
+    return _input_type(name, annotations, module=module, defaults=defaults)
+
+
+def _child_back_fk(model: type[Model], relation: str) -> str:
+    """Return the child FK column name behind a parent's to-many relation."""
+
+    reverse = model._meta.get_field(relation)
+    return reverse.field.name  # type: ignore[union-attr]
+
+
 def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per facet
     node: type,
     *,
@@ -278,6 +382,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     writable: list[str] | None = None,
     insertable: list[str] | None = None,
     updatable: list[str] | None = None,
+    nested: list[NestedInsert] | None = None,
     insert: bool = True,
     update: bool = True,
     delete: bool = True,
@@ -371,34 +476,56 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         id_column,
         updatable if updatable is not None else writable,
     )
+    # --- nested to-many child inserts (Hasura array-relationship inserts) ----
+    # Each declared relation contributes a child row input + its {data: [...]}
+    # envelope, and an optional field on the parent insert input. The child's
+    # FK back to the parent is excluded (the nesting supplies it); the child
+    # input carries an optional public ``id`` so it also serves the consumer's
+    # upsert diff. Persistence stays the ``write_backend``'s concern.
+    nested_specs = tuple(nested or ())
+    nested_input_types: dict[str, type] = {}
+    nested_arr_input_types: dict[str, type] = {}
+    nested_envelope_fields: dict[str, type] = {}
+    nested_types: list[type] = []
+    for spec in nested_specs:
+        child_stem = spec.name or f"{res}_{spec.relation}"
+        child_public_ids = frozenset(spec.field_id_decode or {})
+        back_fk = _child_back_fk(model, spec.relation)
+        child_fields = [
+            column
+            for column in _writable_fields(spec.model, "pk", spec.insertable)
+            if column.name != back_fk
+        ]
+        child_input = _insert_input_type(
+            f"{child_stem}_insert_input",
+            child_fields,
+            child_public_ids,
+            module,
+            with_public_id=True,
+        )
+        arr_input = _input_type(
+            f"{child_stem}_arr_rel_insert_input",
+            {"data": types.GenericAlias(list, (child_input,))},
+            module=module,
+        )
+        nested_input_types[spec.relation] = child_input
+        nested_arr_input_types[spec.relation] = arr_input
+        nested_envelope_fields[spec.relation] = arr_input
+        nested_types.extend((child_input, arr_input))
+
     # insert: required only when the model field has no default and is not
     # nullable. Columns with Django defaults are omitted from the resolver
     # input and let the model apply its default; the GraphQL SDL does not
-    # mirror Python default values (especially mutable / JSON defaults).
+    # mirror Python default values (especially mutable / JSON defaults). A
+    # declared to-many relation adds an optional nested-insert envelope field.
     insert_input: type | None = None
     if insert:
-        insert_ann: dict[str, Any] = {}
-        insert_defaults: dict[str, Any] = {}
-        for field in insert_fields:
-            python_type = _writable_python_type(
-                field,
-                public_id=field.name in public_id_fields,
-            )
-            optional_on_insert = (
-                field.has_default()
-                or getattr(field, "null", False)
-                or getattr(field, "blank", False)
-            )
-            insert_ann[field.name] = (
-                python_type | None if optional_on_insert else python_type
-            )
-            if optional_on_insert:
-                insert_defaults[field.name] = UNSET
-        insert_input = _input_type(
+        insert_input = _insert_input_type(
             f"{res}_insert_input",
-            insert_ann,
-            module=module,
-            defaults=insert_defaults,
+            insert_fields,
+            public_id_fields,
+            module,
+            extra=nested_envelope_fields,
         )
 
     set_input: type | None = None
@@ -671,6 +798,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
                 set_input,
                 pk_columns_input,
                 *groups_types,
+                *nested_types,
             )
             if item is not None
         ],
@@ -697,9 +825,12 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         delete_by_pk_root=delete_by_pk_root,
         enabled_operations=operations,
         insertable_fields=(
-            tuple(field.name for field in insert_fields) if insert else ()
+            tuple(column.name for column in insert_fields) if insert else ()
         ),
         updatable_fields=(
-            tuple(field.name for field in set_fields) if update else ()
+            tuple(column.name for column in set_fields) if update else ()
         ),
+        nested_inserts=nested_specs,
+        nested_input_types=nested_input_types,
+        nested_arr_input_types=nested_arr_input_types,
     )

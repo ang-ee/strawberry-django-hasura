@@ -137,6 +137,43 @@ sort **first on `asc`, last on `desc`**; a positive `_like`/`_ilike` does **not*
 match a NULL row (the negated family does, like Django's `~Q`); and an explicit
 `null` operand (e.g. `_gt: null`) carries no constraint — use `_is_null`.
 
+## Nested object insert (opt-in, additive)
+
+A resource built with `nested=[NestedInsert(relation="lines", model=Line)]`
+exposes Hasura's array-relationship insert on the existing insert root — the
+stock provider never sends it, so this is purely additive to the CRUD SDL
+above:
+
+```graphql
+insert_<res>_one(object: {
+  ...                         # the parent's own <res>_insert_input columns
+  lines: { data: [ <res>_lines_insert_input! ]! }   # optional envelope
+}): <Node>!
+
+input <res>_lines_arr_rel_insert_input { data: [<res>_lines_insert_input!]! }
+input <res>_lines_insert_input {
+  id: String            # optional — the upsert key (omit to insert a new child)
+  <child columns...>    # every column optional; the FK back to the parent is
+                        #   supplied by the nesting and never appears here
+}
+```
+
+- **Shape only.** The library generates the child input, its `{data: […]}`
+  envelope, and the optional parent field, and reduces the whole envelope to
+  plain nested dicts via `input_to_dict`
+  (`{"lines": {"data": [{…}, …]}}`). **Persistence and atomicity are the
+  `write_backend`'s concern** — it writes the parent, then each child under the
+  parent FK, in one transaction, rolling back on a child failure. The library
+  adds no write path (same permission-naive stance as the flat CRUD surface).
+- **One input, two callers.** The child input carries an optional public `id`
+  and all-optional columns so it drives both the nested insert (`id` omitted)
+  and a consumer's authored upsert/diff `_save` mutation (`id` present addresses
+  an existing child). The built `HasuraResource` exposes `nested_input_types` /
+  `nested_arr_input_types` for that reuse.
+- **Child stem** defaults to `<res>_<relation>`; `NestedInsert(name=…)`
+  overrides it. `NestedInsert(field_id_decode={…})` types the named child FK
+  columns as `ID` (public ids), mirroring the top-level knob.
+
 ## Grouping — NDC preview (NOT stock `@refinedev/hasura`)
 
 `<res>_groups` is a **preview** surface emitted **only** when the resource is
