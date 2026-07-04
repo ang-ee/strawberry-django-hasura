@@ -26,6 +26,7 @@ registered raises rather than being silently dropped (see
 from __future__ import annotations
 
 import datetime
+import decimal
 
 import strawberry
 from strawberry import UNSET
@@ -75,6 +76,32 @@ class FloatComparison:
     lte: float | None = strawberry.field(name="_lte", default=UNSET)
     in_: list[float] | None = strawberry.field(name="_in", default=UNSET)
     nin: list[float] | None = strawberry.field(name="_nin", default=UNSET)
+    is_null: bool | None = strawberry.field(name="_is_null", default=UNSET)
+
+
+@strawberry.input(name="Decimal_comparison_exp")
+class DecimalComparison:
+    """Exact fixed-point comparison for ``DecimalField`` columns.
+
+    Same operator set as the other numeric comparisons, but the operands are
+    strawberry ``Decimal`` scalars — exact strings on the wire — so a
+    high-precision money/quantity value round-trips without the double-rounding
+    a ``Float`` operand would introduce (``inputs`` maps ``decimal.Decimal``
+    here, not to :class:`FloatComparison`).
+    """
+
+    eq: decimal.Decimal | None = strawberry.field(name="_eq", default=UNSET)
+    neq: decimal.Decimal | None = strawberry.field(name="_neq", default=UNSET)
+    gt: decimal.Decimal | None = strawberry.field(name="_gt", default=UNSET)
+    gte: decimal.Decimal | None = strawberry.field(name="_gte", default=UNSET)
+    lt: decimal.Decimal | None = strawberry.field(name="_lt", default=UNSET)
+    lte: decimal.Decimal | None = strawberry.field(name="_lte", default=UNSET)
+    in_: list[decimal.Decimal] | None = strawberry.field(
+        name="_in", default=UNSET
+    )
+    nin: list[decimal.Decimal] | None = strawberry.field(
+        name="_nin", default=UNSET
+    )
     is_null: bool | None = strawberry.field(name="_is_null", default=UNSET)
 
 

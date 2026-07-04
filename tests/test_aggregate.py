@@ -10,6 +10,8 @@ returns the same rows.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import strawberry
 
 from strawberry_django_hasura import hasura_resource
@@ -84,6 +86,28 @@ def test_aggregate_sum_is_bigint_string(schema, seeded_notes):
     raw = result.data["notes_aggregate"]["aggregate"]["sum"]["word_count"]
     # BigInt serializes as a string; the value is still 60.
     assert int(raw) == 60
+
+
+def test_aggregate_over_decimal_stays_exact_not_float(schema, seeded_notes):
+    """SUM/AVG/MIN/MAX over a ``DecimalField`` come back as exact ``Decimal``
+    strings, never a lossy Float (F1). The aggregate type is the free
+    ``<Model>Aggregate`` from strawberry-django-aggregates, which types a
+    Decimal column's measures as ``Decimal`` — this only wires it."""
+    result = schema.execute_sync(
+        """{ notes_aggregate { aggregate {
+               sum { price } min { price } max { price }
+             } } }"""
+    )
+    assert result.errors is None, result.errors
+    agg = result.data["notes_aggregate"]["aggregate"]
+    # Exact strings on the wire (the Decimal scalar), not float numbers.
+    assert isinstance(agg["sum"]["price"], str)
+    assert isinstance(agg["min"]["price"], str)
+    assert isinstance(agg["max"]["price"], str)
+    # Alpha 12345678.123456 + Bravo 1000 + Cee 20.5 — exact to the last digit.
+    assert Decimal(agg["sum"]["price"]) == Decimal("12346698.623456")
+    assert Decimal(agg["min"]["price"]) == Decimal("20.5")
+    assert Decimal(agg["max"]["price"]) == Decimal("12345678.123456")
 
 
 def test_aggregate_queryset_can_differ_from_nodes_queryset(seeded_notes):

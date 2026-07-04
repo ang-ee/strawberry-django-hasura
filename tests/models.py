@@ -21,6 +21,10 @@ class NoteModel(models.Model):
     is_starred = models.BooleanField(default=False)
     status = models.CharField(max_length=20, default="draft")
     metadata = models.JSONField(default=dict, blank=True)
+    # An exact fixed-point column (money/quantity shape) so the suite exercises
+    # the Decimal comparison + Decimal aggregate wire — the operand and the
+    # sum/min/max stay exact strings, never a lossy Float.
+    price = models.DecimalField(max_digits=18, decimal_places=6, default=0)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

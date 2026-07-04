@@ -6,6 +6,8 @@ it the provider references. Converted from the spike's rendered Hasura SDL.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 # CRUD surface markers — list (where/order_by/limit/offset), by-pk, mutations,
@@ -60,6 +62,18 @@ AGGREGATE_MARKERS = [
     "max: NoteMaxFields",
     "type NoteSumFields {",
     "word_count: BigInt",  # SUM over an IntegerField widens to BigInt
+    "price: Decimal",  # SUM over a DecimalField stays exact Decimal, not Float
+]
+
+# Decimal wire markers (F1) — a ``DecimalField`` column filters through the
+# exact ``Decimal_comparison_exp`` (strawberry ``Decimal`` operands, exact
+# strings on the wire), NOT ``Float_comparison_exp``; the node field and the
+# aggregate measures stay ``Decimal`` too (never Float).
+DECIMAL_MARKERS = [
+    "input Decimal_comparison_exp {",
+    "price: Decimal_comparison_exp",  # on notes_bool_exp
+    "price: Decimal!",  # the Note node field (exact scalar, not Float)
+    "scalar Decimal",
 ]
 
 # Grouping — NDC-preview surface (CONTRACT.md "Grouping — NDC preview"). The
@@ -93,6 +107,28 @@ def test_aggregate_marker_present(schema, marker):
 @pytest.mark.parametrize("marker", GROUPING_MARKERS)
 def test_grouping_marker_present(schema, marker):
     assert marker in schema.as_str()
+
+
+@pytest.mark.parametrize("marker", DECIMAL_MARKERS)
+def test_decimal_marker_present(schema, marker):
+    assert marker in schema.as_str()
+
+
+def test_decimal_column_does_not_degrade_to_float(schema):
+    """A ``DecimalField`` filters as exact ``Decimal`` and its SUM/AVG/MIN/MAX
+    measures stay ``Decimal`` — the F1 wire fix. (STDDEV/VARIANCE over a
+    decimal are inherently Float — a statistical result, not a degradation — so
+    only the exact-valued ops are asserted.)"""
+    sdl = schema.as_str()
+    # The comparison input is exact Decimal, never Float.
+    assert "price: Float_comparison_exp" not in sdl
+    assert "price: Decimal_comparison_exp" in sdl
+    # The exact-valued aggregate measures keep the column's Decimal scalar.
+    for block in ("Sum", "Avg", "Min", "Max"):
+        match = re.search(rf"type Note{block}Fields \{{[^}}]*\}}", sdl)
+        assert match is not None, f"Note{block}Fields missing"
+        assert "price: Decimal" in match.group(0)
+        assert "price: Float" not in match.group(0)
 
 
 def test_grouped_aggregate_is_the_free_type_no_reshape(schema):

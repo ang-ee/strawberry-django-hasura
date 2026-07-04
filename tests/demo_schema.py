@@ -29,6 +29,7 @@ The runnable ``examples/demo_schema.py`` mirrors this module (standalone, for
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import strawberry
@@ -61,6 +62,7 @@ class Note:  # GraphQL type name is `Note`
     is_starred: auto
     status: auto
     metadata: auto
+    price: auto
     updated_at: auto
 
     @strawberry.field
@@ -136,9 +138,10 @@ resource = hasura_resource(
         "is_starred",
         "status",
         "metadata",
+        "price",
     ],
-    sortable=["title", "word_count", "updated_at"],
-    aggregatable=["word_count"],
+    sortable=["title", "word_count", "price", "updated_at"],
+    aggregatable=["word_count", "price"],
     groupable=["status", "updated_at"],
     get_queryset=get_queryset,
     write_backend=NoteWriteBackend(),
@@ -162,12 +165,15 @@ schema = strawberry.Schema(
 def seed() -> None:
     if NoteModel.objects.exists():
         return
+    # ``price`` carries an exact high-precision value (Alpha) plus two plain
+    # ones so the Decimal filter/aggregate surfaces round-trip exact strings.
     NoteModel.objects.create(
         title="Alpha",
         word_count=10,
         is_starred=True,
         status="published",
         metadata={"kind": "note", "flags": ["pinned"]},
+        price=Decimal("12345678.123456"),
     )
     NoteModel.objects.create(
         title="Bravo",
@@ -175,6 +181,7 @@ def seed() -> None:
         is_starred=False,
         status="draft",
         metadata={"kind": "task", "flags": []},
+        price=Decimal("1000"),
     )
     NoteModel.objects.create(
         title="Cee",
@@ -182,4 +189,5 @@ def seed() -> None:
         is_starred=True,
         status="published",
         metadata={"kind": "note", "flags": []},
+        price=Decimal("20.5"),
     )

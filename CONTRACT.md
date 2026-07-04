@@ -23,6 +23,9 @@ column / argument name is verbatim, not camelCased.
   - `aggregate` is the **native** `<Model>Aggregate` from
     `strawberry-django-aggregates` — `{ count: Int!, sum { <field> },
     avg { <field> }, min { <field> }, max { <field> }, … }`. **No reshape.**
+    `sum`/`avg`/`min`/`max` over a `DecimalField` stay exact `Decimal` (the
+    aggregates library types them straight from the column) — only the
+    statistical `stddev`/`variance` are `Float`, as their result is.
 
 ## Mutations (provider derives these operation names)
 
@@ -38,6 +41,10 @@ composition:
 - comparators: `_eq, _neq, _gt, _gte, _lt, _lte, _in, _nin, _is_null`
 - string: `_like, _nlike, _ilike, _nilike` (+ Postgres-only `_iregex`,
   `_similar`, `_nsimilar` accepted in the SDL)
+- decimal: a `DecimalField` column takes the exact `Decimal_comparison_exp`
+  (the full numeric operator set above, with strawberry `Decimal` operands —
+  exact strings on the wire), **not** `Float_comparison_exp`; a
+  high-precision money/quantity value round-trips without a lossy double
 - JSON: `_contains` for object/list containment, plus equality/null operators
 - composition: `_and: [notes_bool_exp!]`, `_or: [notes_bool_exp!]`,
   `_not: notes_bool_exp`

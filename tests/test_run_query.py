@@ -189,7 +189,7 @@ def test_sdl_shape() -> None:
         assert marker in sdl, marker
 
 
-def test_decimal_maps_to_float_and_nulls_sort_first_on_asc() -> None:
+def test_decimal_maps_to_decimal_and_nulls_sort_first_on_asc() -> None:
     @dataclasses.dataclass
     class _Thing:
         id: str
@@ -216,8 +216,10 @@ def test_decimal_maps_to_float_and_nulls_sort_first_on_asc() -> None:
     schema = strawberry.Schema(
         query=resource.query, types=[Thing, *resource.types]
     )
-    # decimal -> the shared owner's Float_comparison_exp, not String.
-    assert "Float_comparison_exp" in str(schema)
+    # decimal -> the shared owner's exact Decimal_comparison_exp (not Float,
+    # which would round the operand through a double; not String).
+    assert "Decimal_comparison_exp" in str(schema)
+    assert "Float_comparison_exp" not in str(schema)
     # NULL sorts first on asc (matches the model path's SQLite default).
     result = schema.execute_sync("{ things(order_by: [{note: asc}]) { id } }")
     assert result.errors is None, result.errors

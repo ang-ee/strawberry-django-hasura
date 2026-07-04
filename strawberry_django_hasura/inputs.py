@@ -30,6 +30,7 @@ from strawberry.types import get_object_definition
 from .comparisons import (
     BooleanComparison,
     DateTimeComparison,
+    DecimalComparison,
     FloatComparison,
     IDComparison,
     IntComparison,
@@ -50,7 +51,7 @@ COMPARISON_FOR_TYPE: dict[Any, type] = {
     uuid.UUID: StringComparison,
     int: IntComparison,
     float: FloatComparison,
-    decimal.Decimal: FloatComparison,
+    decimal.Decimal: DecimalComparison,
     bool: BooleanComparison,
     datetime.datetime: DateTimeComparison,
     datetime.date: DateTimeComparison,

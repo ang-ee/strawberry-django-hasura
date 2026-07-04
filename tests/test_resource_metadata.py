@@ -49,6 +49,7 @@ def test_model_resource_exposes_builder_decided_write_facts():
         "is_starred",
         "status",
         "metadata",
+        "price",
     )
     assert resource.updatable_fields == (
         "title",
@@ -56,4 +57,5 @@ def test_model_resource_exposes_builder_decided_write_facts():
         "is_starred",
         "status",
         "metadata",
+        "price",
     )

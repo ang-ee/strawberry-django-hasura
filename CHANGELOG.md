@@ -5,6 +5,28 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`Decimal_comparison_exp` — exact fixed-point filtering.** A `DecimalField`
+  column now filters through a new `DecimalComparison` (`comparisons.py`) whose
+  operands are strawberry `Decimal` scalars (exact strings on the wire), across
+  the full numeric operator set (`_eq`/`_neq`/`_gt`/`_gte`/`_lt`/`_lte`/`_in`/
+  `_nin`/`_is_null`). Both the model path and the `hasura_run_query_resource`
+  path pick it up through the shared `inputs.COMPARISON_FOR_TYPE` owner.
+
+### Changed
+
+- **`decimal.Decimal` maps to `DecimalComparison`, not `FloatComparison`**
+  (`inputs.COMPARISON_FOR_TYPE`). A high-precision money/quantity value no
+  longer round-trips through a lossy double on the filter surface. The
+  aggregate surface was already exact — `strawberry-django-aggregates` types
+  `sum`/`avg`/`min`/`max` over a `DecimalField` as `Decimal` (only the
+  statistical `stddev`/`variance` remain `Float`, as their result is). Emitted
+  SDL changes for any schema with a `DecimalField` column; `CONTRACT.md` and
+  the SDL-marker tests are updated to match.
+
 ## [0.4.0] — 2026-07-02
 
 ### Added
