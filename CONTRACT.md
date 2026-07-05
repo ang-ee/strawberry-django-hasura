@@ -171,8 +171,20 @@ input <res>_lines_insert_input {
   an existing child). The built `HasuraResource` exposes `nested_input_types` /
   `nested_arr_input_types` for that reuse.
 - **Child stem** defaults to `<res>_<relation>`; `NestedInsert(name=…)`
-  overrides it. `NestedInsert(field_id_decode={…})` types the named child FK
-  columns as `ID` (public ids), mirroring the top-level knob.
+  overrides it. `NestedInsert(public_id_columns=[…])` types the named child
+  columns as `ID` (public ids) — decoding them stays the write backend's
+  concern, exactly like the parent's write path. `NestedInsert(id_column=…)`
+  excludes the child's own public-id column from the writable set
+  (server-owned), mirroring the top-level `id_column`.
+- **Declared, validated.** `relation` accepts the `related_name`, the default
+  `<child>_set` accessor, or the related query name, and must resolve to a
+  reverse to-many FK whose target is `model` — an unknown name, a forward
+  field, a reverse one-to-one/many-to-many, a mismatched `model`, or the
+  back-FK listed in `insertable` fails at build, not at the first request.
+  `nested=` requires `insert=True`, so a read-only resource never emits
+  write-shaped child input types. An explicit `<relation>: null` envelope
+  reaches the backend with the key absent (Hasura: a null relationship
+  envelope means no children, not a null column).
 
 ## Grouping — NDC preview (NOT stock `@refinedev/hasura`)
 

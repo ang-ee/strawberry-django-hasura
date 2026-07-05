@@ -13,9 +13,10 @@ Hasura input envelopes into model kwargs:
 reduces to the same "set (non-UNSET) fields as kwargs" as any GraphQL input.
 It recurses into nested input objects (Hasura array-relationship inserts —
 ``<relation>: {data: [<child>...]}``) so the caller's write backend receives
-plain nested dicts, never half-decoded strawberry input instances; a list of
-scalar operands (an m2m ``[ID!]`` array) is left untouched because its items
-are not input objects.
+plain nested dicts, never half-decoded strawberry input instances. Only a
+declared strawberry **input** reduces: any other value — a scalar, a list of
+scalar operands (an m2m ``[ID!]`` array), a tuple, or a custom-scalar value
+that happens to be a dataclass — passes through verbatim.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import dataclasses
 from typing import Any
 
 from strawberry import UNSET
+from strawberry.types import get_object_definition
 
 
 def input_to_dict(value: Any) -> dict[str, Any]:
@@ -40,17 +42,18 @@ def _reduce(value: Any) -> Any:
     """Reduce one input field value, recursing through nested input objects."""
     if _is_input_instance(value):
         return input_to_dict(value)
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list):
         return [_reduce(item) for item in value]
     return value
 
 
 def _is_input_instance(value: Any) -> bool:
-    """Return whether ``value`` is a strawberry input instance (a dataclass).
+    """Return whether ``value`` is a strawberry **input** instance.
 
-    Strawberry inputs are dataclasses, so a nested ``{data: [...]}`` envelope
-    and its child rows reduce to dicts; scalars (``Decimal``, ``datetime``,
-    JSON ``dict``\\ s) and public-id strings are not dataclasses and pass
-    through verbatim.
+    The check is strawberry's own type definition (``is_input``), not "is a
+    dataclass": a custom scalar may parse to a plain dataclass value (a
+    ``Money``/``GeoPoint`` object) that must reach the write backend intact,
+    never flattened to a dict.
     """
-    return dataclasses.is_dataclass(value) and not isinstance(value, type)
+    definition = get_object_definition(type(value))
+    return definition is not None and definition.is_input

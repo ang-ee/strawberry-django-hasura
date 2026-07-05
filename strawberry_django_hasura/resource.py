@@ -33,13 +33,14 @@ optional convenience for a schema dedicated to a single dialect.
 from __future__ import annotations
 
 import types
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any, Protocol, cast
 
 import strawberry
-from django.db.models import Model, QuerySet
+from django.core.exceptions import FieldDoesNotExist
+from django.db.models import Field, Model, QuerySet
 from strawberry import UNSET
 from strawberry.types import get_object_definition
 from strawberry_django.fields.types import field_type_map
@@ -77,8 +78,10 @@ class WriteBackend(Protocol):
 
     Persistence (and its authorization — REBAC gates, ``full_clean``, relation
     coercion) belongs to the model / the consuming app, not this library. Each
-    Hasura write dispatches to one method here with the already-decoded input;
-    the toy demo wraps the bare ORM, a real consumer wraps its CRUD machinery.
+    Hasura write dispatches to one method here with the input already reduced
+    to plain (possibly nested) dicts — never a strawberry input instance. The
+    sqid⇄pk decode at the write boundary stays this backend's concern; the toy
+    demo wraps the bare ORM, a real consumer wraps its CRUD machinery.
     ``delete`` returns the deleted instance (or ``None``) so the Hasura
     ``delete_<res>_by_pk`` response can resolve the removed row.
     """
@@ -101,14 +104,23 @@ class NestedInsert:
     envelope, atomically. This declares one such relation for
     :func:`hasura_resource`:
 
-    - ``relation`` is the parent's reverse-FK accessor (``"lines"``); the
-      child's foreign key back to the parent is derived from it and
-      **excluded** from the child row input (the nesting supplies it).
-    - ``model`` is the child Django model whose editable columns shape the
-      child row input (``insertable`` overrides the auto allowlist, mirroring
-      the top-level ``insertable`` knob).
-    - ``field_id_decode`` marks child columns whose operands are public ids
-      (typed ``ID`` in the input), mirroring the top-level ``field_id_decode``.
+    - ``relation`` names the parent's reverse-FK to-many relation — the
+      ``related_name`` (``"lines"``) or, without one, either the default
+      accessor (``"line_set"``) or the related query name (``"line"``); it is
+      also the wire name of the parent input's envelope field. The child's
+      foreign key back to the parent is derived from it and **excluded** from
+      the child row input (the nesting supplies it); listing that column in
+      ``insertable`` fails fast.
+    - ``model`` is the child Django model — it must be the relation's target
+      (checked at build). Its editable columns shape the child row input
+      (``insertable`` overrides the auto allowlist, mirroring the top-level
+      ``insertable`` knob).
+    - ``public_id_columns`` marks child columns whose operands are public ids
+      (typed ``ID`` in the input). Decoding them stays the write backend's
+      concern, exactly like the parent's write path.
+    - ``id_column`` names the child's public id column so it is excluded from
+      the writable columns (server-owned), mirroring the top-level
+      ``id_column`` (default ``"pk"`` — a raw-pk child).
     - ``name`` overrides the child input type stem (default
       ``f"{res}_{relation}"``).
 
@@ -125,8 +137,17 @@ class NestedInsert:
     relation: str
     model: type[Model]
     name: str | None = None
-    insertable: list[str] | None = None
-    field_id_decode: Mapping[str, Callable[[Any], Any]] | None = None
+    insertable: Sequence[str] | None = None
+    public_id_columns: Sequence[str] | None = None
+    id_column: str = "pk"
+
+    def __post_init__(self) -> None:
+        # Freeze the sequence knobs to tuples so the frozen spec stays
+        # hashable however the caller spelled them.
+        for knob in ("insertable", "public_id_columns"):
+            value = getattr(self, knob)
+            if value is not None:
+                object.__setattr__(self, knob, tuple(value))
 
 
 @dataclass(frozen=True)
@@ -224,7 +245,7 @@ def _comparison_for(
 def _writable_fields(
     model: type[Model],
     id_column: str,
-    writable: list[str] | None = None,
+    writable: Sequence[str] | None = None,
 ) -> list[Any]:
     """The editable, non-pk, non-auto fields (insert / ``_set``).
 
@@ -257,6 +278,12 @@ def _writable_fields(
 
 
 def _not_writable_reason(field: Any, id_column: str) -> str | None:
+    # A reverse accessor (ManyToOneRel / ManyToManyRel / OneToOneRel) is not a
+    # Field: the OTHER model owns that relation, so it is never client-settable
+    # here — including a reverse many-to-many, which would otherwise slip
+    # through the forward-m2m allowance below.
+    if not isinstance(field, Field):
+        return "it is a reverse relation accessor, not a column"
     if getattr(field, "many_to_many", False):
         return None
     if not getattr(field, "concrete", False):
@@ -346,6 +373,12 @@ def _insert_input_type(
         annotations["id"] = str | None
         defaults["id"] = UNSET
     for column in fields:
+        if with_public_id and column.name == "id":
+            raise TypeError(
+                f"column 'id' collides with the public upsert key injected "
+                f"into {name}; exclude it (id_column / insertable) or rename "
+                "the model column"
+            )
         python_type = _writable_python_type(
             column,
             public_id=column.name in public_id_fields,
@@ -362,11 +395,38 @@ def _insert_input_type(
     return _input_type(name, annotations, module=module, defaults=defaults)
 
 
-def _child_back_fk(model: type[Model], relation: str) -> str:
-    """Return the child FK column name behind a parent's to-many relation."""
+def _child_relation(model: type[Model], relation: str) -> Any:
+    """Resolve a declared nested relation to the parent's reverse-FK rel.
 
-    reverse = model._meta.get_field(relation)
-    return reverse.field.name  # type: ignore[union-attr]
+    Accepts the ``related_name`` / related query name (what ``get_field``
+    resolves) or the default ``<child>_set`` accessor, and fails fast — with
+    the relation named — on anything that is not a reverse to-many foreign
+    key (a forward field, a reverse one-to-one, a reverse many-to-many).
+    """
+    reverse: Any
+    try:
+        reverse = model._meta.get_field(relation)
+    except FieldDoesNotExist:
+        reverse = next(
+            (
+                rel
+                for rel in model._meta.related_objects
+                if rel.get_accessor_name() == relation
+            ),
+            None,
+        )
+        if reverse is None:
+            raise FieldDoesNotExist(
+                f"{model.__name__} has no relation {relation!r} "
+                "(no field, related name, or reverse accessor matches)"
+            ) from None
+    if not getattr(reverse, "one_to_many", False):
+        raise TypeError(
+            f"NestedInsert relation {relation!r} on {model.__name__} is "
+            f"{type(reverse).__name__}, not a reverse to-many foreign key; "
+            "a nested object insert needs an array relationship"
+        )
+    return reverse
 
 
 def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per facet
@@ -409,7 +469,9 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     permissions for insert / ``_set`` inputs (default: editable concrete model
     columns plus editable many-to-many relation arrays). ``insertable`` and
     ``updatable`` override that shared allowlist for insert and update
-    separately. ``insert`` / ``update`` / ``delete``
+    separately. ``nested`` declares to-many child relations exposed as Hasura
+    array-relationship inserts (:class:`NestedInsert`); it requires
+    ``insert=True``. ``insert`` / ``update`` / ``delete``
     mirror Hasura table mutation operation permissions: disabling one removes
     its root and the input types used only by that operation.
     ``field_id_decode`` marks non-``id`` scalar fields whose Hasura operands
@@ -481,25 +543,42 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     # envelope, and an optional field on the parent insert input. The child's
     # FK back to the parent is excluded (the nesting supplies it); the child
     # input carries an optional public ``id`` so it also serves the consumer's
-    # upsert diff. Persistence stays the ``write_backend``'s concern.
+    # upsert diff. Persistence stays the ``write_backend``'s concern. Every
+    # spec is validated here — misdeclared relations fail at build, not at the
+    # first request.
     nested_specs = tuple(nested or ())
+    if nested_specs and not insert:
+        raise TypeError(
+            "nested= declares insert-only input types; it requires insert=True"
+        )
     nested_input_types: dict[str, type] = {}
     nested_arr_input_types: dict[str, type] = {}
-    nested_envelope_fields: dict[str, type] = {}
-    nested_types: list[type] = []
     for spec in nested_specs:
         child_stem = spec.name or f"{res}_{spec.relation}"
-        child_public_ids = frozenset(spec.field_id_decode or {})
-        back_fk = _child_back_fk(model, spec.relation)
+        reverse = _child_relation(model, spec.relation)
+        if reverse.related_model is not spec.model:
+            raise TypeError(
+                f"NestedInsert(relation={spec.relation!r}) targets "
+                f"{reverse.related_model.__name__}, but model= is "
+                f"{spec.model.__name__}"
+            )
+        back_fk = reverse.field.name
+        if spec.insertable is not None and back_fk in spec.insertable:
+            raise TypeError(
+                f"column {back_fk!r} is the child's foreign key back to the "
+                "parent; the nesting supplies it — remove it from insertable"
+            )
         child_fields = [
             column
-            for column in _writable_fields(spec.model, "pk", spec.insertable)
+            for column in _writable_fields(
+                spec.model, spec.id_column, spec.insertable
+            )
             if column.name != back_fk
         ]
         child_input = _insert_input_type(
             f"{child_stem}_insert_input",
             child_fields,
-            child_public_ids,
+            frozenset(spec.public_id_columns or ()),
             module,
             with_public_id=True,
         )
@@ -510,8 +589,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         )
         nested_input_types[spec.relation] = child_input
         nested_arr_input_types[spec.relation] = arr_input
-        nested_envelope_fields[spec.relation] = arr_input
-        nested_types.extend((child_input, arr_input))
+    nested_types = [
+        *nested_input_types.values(),
+        *nested_arr_input_types.values(),
+    ]
 
     # insert: required only when the model field has no default and is not
     # nullable. Columns with Django defaults are omitted from the resolver
@@ -525,7 +606,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             insert_fields,
             public_id_fields,
             module,
-            extra=nested_envelope_fields,
+            extra=nested_arr_input_types,
         )
 
     set_input: type | None = None
@@ -719,7 +800,14 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             info: strawberry.Info,
             object: Any,
         ) -> Any:
-            return write_backend.create(info, input_to_dict(object))
+            data = input_to_dict(object)
+            # Hasura semantics: an explicit ``<relation>: null`` envelope
+            # means "no children", not a null column — the backend must see
+            # the key absent, same as an omitted envelope.
+            for relation in nested_arr_input_types:
+                if data.get(relation) is None:
+                    data.pop(relation, None)
+            return write_backend.create(info, data)
 
         resolve_insert.__annotations__ = {
             "self": Any,
