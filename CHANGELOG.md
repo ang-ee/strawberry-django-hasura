@@ -5,7 +5,7 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] — 2026-07-05
 
 ### Added
 
@@ -24,12 +24,39 @@ and this project adheres to
   `HasuraResource` exposes `nested_inserts`, `nested_input_types`, and
   `nested_arr_input_types` so a consumer can reuse the child input for its own
   mutation. `NestedInsert` is a new public export.
+- **`NestedInsert` is declared, validated, hashable.** `relation` accepts the
+  `related_name`, the default `<child>_set` accessor, or the related query
+  name, and must resolve to a reverse to-many FK whose target is `model` — an
+  unknown name, a forward field, a reverse one-to-one/many-to-many, a
+  mismatched `model`, or the back-FK listed in `insertable` fails at build,
+  not at the first request. `nested=` requires `insert=True` (a read-only
+  resource never emits write-shaped child inputs) and a child column literally
+  named `id` fails fast instead of silently shadowing the injected upsert key.
+  The frozen spec freezes its sequence knobs to tuples, so it stays hashable.
+  `public_id_columns=[…]` types the named child columns as `ID` (decoding
+  stays the write backend's concern, exactly like the parent's write path) and
+  `id_column=…` excludes the child's own public-id column from the writable
+  set, mirroring the top-level knob.
 - **`input_to_dict` recurses through nested input objects.** It now reduces the
   `{data: [...]}` envelope (and any nested input) to plain nested dicts so the
   caller's `write_backend` receives ready-to-persist kwargs, never a
-  half-decoded strawberry input instance. A list of scalar operands (an m2m
-  `[ID!]` array) is left untouched. Persistence and atomicity stay the
-  `write_backend`'s concern — the library owns the input shape only.
+  half-decoded strawberry input instance. Only declared strawberry **inputs**
+  reduce: a scalar list (an m2m `[ID!]` array), a tuple, and a custom-scalar
+  value that is itself a dataclass (a `Money` object) pass through verbatim.
+  An explicit `<relation>: null` envelope reaches the backend with the key
+  absent (Hasura: a null relationship envelope means no children, not a null
+  column). Persistence and atomicity stay the `write_backend`'s concern — the
+  library owns the input shape only.
+
+### Fixed
+
+- **Reverse relation accessors are never client-writable.** The writable-field
+  scan names reverse accessors (`ManyToOneRel` / `ManyToManyRel` /
+  `OneToOneRel`) as not-writable instead of admitting reverse many-to-many
+  accessors: a model that is the *target* of another model's
+  `ManyToManyField` no longer risks exposing that reverse relation as a
+  client-settable array — and building an insert surface over such a model no
+  longer crashes (`'ManyToManyRel' object has no attribute 'has_default'`).
 
 - **`Decimal_comparison_exp` — exact fixed-point filtering.** A `DecimalField`
   column now filters through a new `DecimalComparison` (`comparisons.py`) whose
