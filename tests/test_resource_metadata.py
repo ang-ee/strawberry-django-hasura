@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
+
 from strawberry.types import get_object_definition
 
+from strawberry_django_hasura import HasuraResource
 from tests.demo_schema import Note, resource
 
 
@@ -36,6 +39,7 @@ def test_model_resource_exposes_role_named_types_and_roots():
     assert resource.aggregate_root == "notes_aggregate"
     assert resource.detail_root == "notes_by_pk"
     assert resource.groups_root == "notes_groups"
+    assert resource.groups_count_root == "notes_groups_count"
     assert resource.insert_one_root == "insert_notes_one"
     assert resource.update_by_pk_root == "update_notes_by_pk"
     assert resource.delete_by_pk_root == "delete_notes_by_pk"
@@ -59,3 +63,9 @@ def test_model_resource_exposes_builder_decided_write_facts():
         "metadata",
         "price",
     )
+
+
+def test_group_count_metadata_is_appended_for_positional_compatibility():
+    names = [field.name for field in fields(HasuraResource)]
+
+    assert names[-1] == "groups_count_root"

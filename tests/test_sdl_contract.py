@@ -81,6 +81,8 @@ DECIMAL_MARKERS = [
 # `<Model>Aggregate` (no reshape); emitted because the demo uses `groupable`.
 GROUPING_MARKERS = [
     "notes_groups(group_by: [NoteGroupBySpec!]!",
+    "notes_groups_count(group_by: [NoteGroupBySpec!]!,"
+    " where: notes_bool_exp = null, having: NoteHaving = null): Int!",
     "): [notes_group!]!",
     "type notes_group {",
     "key: NoteGroupKey!",

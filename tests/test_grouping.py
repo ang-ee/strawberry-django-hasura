@@ -119,3 +119,39 @@ def test_groups_order_by_and_offset_page(schema, seeded_notes):
     # order_by makes offset paging deterministic: draft < published (asc).
     assert page0.data["notes_groups"][0]["key"]["status"] == "draft"
     assert page1.data["notes_groups"][0]["key"]["status"] == "published"
+
+
+def test_groups_count_ignores_page_window(schema, seeded_notes):
+    result = schema.execute_sync(
+        """
+        query {
+          total: notes_groups_count(group_by: [{ field: STATUS }])
+          page: notes_groups(
+            group_by: [{ field: STATUS }],
+            order_by: [{ field: "status" }],
+            limit: 1,
+            offset: 1
+          ) { key { status } }
+        }
+        """
+    )
+    assert result.errors is None, result.errors
+    assert result.data["total"] == 2
+    assert len(result.data["page"]) == 1
+
+
+def test_groups_count_applies_where_and_having(schema, seeded_notes):
+    result = schema.execute_sync(
+        """
+        query($where: notes_bool_exp) {
+          notes_groups_count(
+            group_by: [{ field: STATUS }],
+            where: $where,
+            having: { count_gt: 1 }
+          )
+        }
+        """,
+        variable_values={"where": {"status": {"_eq": "published"}}},
+    )
+    assert result.errors is None, result.errors
+    assert result.data["notes_groups_count"] == 1

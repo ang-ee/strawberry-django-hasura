@@ -5,6 +5,24 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-07-15
+
+### Added
+
+- **Exact grouped cardinality root.** A groupable resource now emits
+  `<res>_groups_count(group_by, where, having): Int!` alongside
+  `<res>_groups`. It applies the same row filter, group translation, and
+  post-aggregate `HAVING` predicate while deliberately ignoring the row
+  root's order, limit, and offset. Counting delegates to the public
+  database-side `AggregateBuilder.count_groups(...)` seam.
+- **Grouped-count metadata.** `HasuraResource.groups_count_root` exposes the
+  generated root name for downstream schema metadata and code generators.
+
+### Changed
+
+- Requires `strawberry-django-aggregates >= 0.10.0` for the public exact-count
+  composition seam.
+
 ## [0.5.0] — 2026-07-05
 
 ### Added
@@ -234,6 +252,8 @@ for the target SDL and [`AGENTS.md`](./AGENTS.md) for the architecture.
   schema built with this library, and an in-memory SQLite test suite covering
   every surface plus the emitted-SDL contract.
 
+[0.6.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.6.0
+[0.5.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.4.0
 [0.3.2]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.3.2
 [0.3.1]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.3.1

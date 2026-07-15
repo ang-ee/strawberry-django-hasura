@@ -1,6 +1,7 @@
 """Hasura/NDC-shaped grouped aggregation — PREVIEW (non-stock).
 
-``<res>_groups`` is **not** part of the stock ``@refinedev/hasura`` contract
+``<res>_groups`` and ``<res>_groups_count`` are **not** part of the stock
+``@refinedev/hasura`` contract
 (that provider never sends ``group_by``). It is a forward-looking, **preview**
 surface shaped to the Hasura v3 / NDC ``groups`` semantics — dimensions +
 aggregates + ``having`` (over aggregates) + ``order_by`` + offset paging — for
@@ -21,7 +22,7 @@ reshape:
   ``<Model>Aggregate`` via ``shape_aggregate_row``. The aggregate is *wired,
   never reshaped* (see ``CONTRACT.md`` — "the aggregate is FREE").
 
-Enable it by building the resource with ``groupable=[...]``.
+Enable them by building the resource with ``groupable=[...]``.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from typing import Any
 import strawberry
 from django.db.models import QuerySet
 from strawberry_django_aggregates import (
+    AggregateOp,
     compute_aggregation,
     shape_aggregate_row,
 )
@@ -52,8 +54,8 @@ def make_groups_field(
     id_column: str = "pk",
     field_decoders: Any = None,
     max_groups: int | None = None,
-) -> tuple[Any, list[type]]:
-    """Return the ``<res>_groups`` field + the generated group types.
+) -> tuple[Any, Any, list[type]]:
+    """Return grouped row/count fields + the generated group types.
 
     PREVIEW / NDC-shaped (see the module docstring). ``builder`` / ``built``
     are the model's :class:`~strawberry_django_aggregates.AggregateBuilder`
@@ -61,7 +63,8 @@ def make_groups_field(
     aggregate the ``<res>_aggregate`` container exposes, so the grouped
     aggregate is not a second type. Emits a ``<res>_group { key:
     <Model>GroupKey!, aggregate: <Model>Aggregate! }`` container under a
-    ``<res>_groups(group_by, where, having, order_by, limit, offset)`` root.
+    ``<res>_groups(group_by, where, having, order_by, limit, offset)`` root
+    plus its exact, unpaginated ``<res>_groups_count`` companion.
     """
     module = _host_module(resource_name)
     group_key_type = built.group_key_type
@@ -86,6 +89,19 @@ def make_groups_field(
     )
     setattr(module, f"{resource_name}_group", group_type)
 
+    def filtered_queryset(info: strawberry.Info, where: Any) -> QuerySet[Any]:
+        qs: QuerySet[Any] = get_queryset(info)
+        if where is not None:
+            qs = qs.filter(
+                where_to_q(
+                    where,
+                    id_column=id_column,
+                    id_decode=id_decode,
+                    field_decoders=field_decoders,
+                )
+            )
+        return qs
+
     def resolve_groups(
         self: Any,
         info: strawberry.Info,
@@ -97,16 +113,7 @@ def make_groups_field(
         offset: int | None = None,
     ) -> list[Any]:
         del self
-        qs: QuerySet[Any] = get_queryset(info)
-        if where is not None:
-            qs = qs.filter(
-                where_to_q(
-                    where,
-                    id_column=id_column,
-                    id_decode=id_decode,
-                    field_decoders=field_decoders,
-                )
-            )
+        qs = filtered_queryset(info, where)
         # Owner-translated: wire inputs → compute_aggregation arguments. The
         # adapter never re-implements the spec / granularity / having parsing.
         spec = builder.translate_group_by(group_by)
@@ -146,10 +153,44 @@ def make_groups_field(
         "offset": int | None,
         "return": list[group_type],  # type: ignore[valid-type]
     }
+
+    def resolve_groups_count(
+        self: Any,
+        info: strawberry.Info,
+        group_by: list[Any],
+        where: Any = None,
+        having: Any = None,
+    ) -> int:
+        del self
+        qs = filtered_queryset(info, where)
+        spec = builder.translate_group_by(group_by)
+        requested = [(AggregateOp.COUNT, None)]
+        having_dict = builder.translate_having(having, requested)
+        return int(
+            builder.count_groups(
+                qs,
+                spec,
+                requested,
+                having_dict,
+            )
+        )
+
+    resolve_groups_count.__annotations__ = {
+        "self": Any,
+        "info": strawberry.Info,
+        "group_by": list[group_by_spec],  # type: ignore[valid-type]
+        "where": filter_type | None,
+        "having": having_input | None,
+        "return": int,
+    }
     return (
         strawberry.field(
             resolver=resolve_groups,
             name=f"{resource_name}_groups",
+        ),
+        strawberry.field(
+            resolver=resolve_groups_count,
+            name=f"{resource_name}_groups_count",
         ),
         [
             group_type,

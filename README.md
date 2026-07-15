@@ -157,6 +157,7 @@ whether it is a sqid.
 | Ordering | `ordering` | `[<resource>_order_by!]` + the `order_by` enum → `.order_by()` |
 | Pagination | `connection` | bare `limit` / `offset` → a queryset slice |
 | Aggregation | `aggregation`, `connection` | the **free** `<resource>_aggregate { aggregate, nodes }` — the native `<Model>Aggregate`, zero reshape |
+| Grouping | `grouping` | preview `<resource>_groups` rows plus exact `<resource>_groups_count(group_by, where, having): Int!` before paging |
 | Mutations | `mutations` | `insert`/`update`/`delete`-by-pk envelope → model kwargs |
 | Naming | `naming` | `hasura_config()` — snake_case verbatim on the wire |
 
@@ -169,7 +170,7 @@ aggregate), no patching — using only the `idType: "String"` option.
 
 ## Status
 
-Beta (v0.1.0). The public API (`__init__` exports) and the emitted SDL shape
+Beta (v0.6.0). The public API (`__init__` exports) and the emitted SDL shape
 follow [`CONTRACT.md`](./CONTRACT.md) and are stable for early adopters; minor
 iteration is expected before a 1.0 stability commitment. Runtime: Python 3.14,
 Django 6.0.

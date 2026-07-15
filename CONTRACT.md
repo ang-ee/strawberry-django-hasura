@@ -203,6 +203,12 @@ notes_groups(
   limit: Int  offset: Int          # offset paging
 ): [notes_group!]!
 
+notes_groups_count(
+  group_by: [NoteGroupBySpec!]!   # same dimensions as notes_groups
+  where:    notes_bool_exp         # same pre-group filter
+  having:   NoteHaving             # same post-aggregate predicate
+): Int!                            # exact total before limit / offset
+
 type notes_group {
   key:       NoteGroupKey!   # typed composite key — one field per dimension,
                              #   choices→enum, date buckets + `_range` siblings
@@ -228,6 +234,10 @@ type notes_group {
   `hasura_resource(max_groups=…)` to cap an unbounded high-cardinality grouping
   (default uncapped). Reads run on the caller's scoped queryset
   (permission-naive), with the Hasura `where` applied before grouping.
+- **Exact cardinality.** `<res>_groups_count` shares `group_by`, `where`, and
+  `having` semantics with `<res>_groups`, but deliberately has no ordering,
+  limit, or offset. It delegates to the aggregation owner's database-side
+  count path and never materializes every group row in Python.
 - **Preview:** the DDN GraphQL `group_by` SDL is unpublished (Hasura
   `graphql-engine#10786`), so these field/argument names may change to track it.
   The stock list / aggregate / CRUD SDL above is unaffected (grouping is purely

@@ -94,6 +94,7 @@ def test_run_query_resource_exposes_role_metadata() -> None:
     assert resource.aggregate_root == "platform_addons_aggregate"
     assert resource.detail_root == "platform_addons_by_pk"
     assert resource.groups_root is None
+    assert resource.groups_count_root is None
     assert resource.enabled_operations == ()
 
 

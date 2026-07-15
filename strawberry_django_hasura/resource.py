@@ -1,11 +1,13 @@
 """One-call ``hasura_resource(...)`` — the full Hasura surface for a model.
 
-The five surfaces (``comparisons`` / ``filtering`` / ``ordering`` /
-``connection`` / ``mutations`` / ``aggregation``) are model-independent
-primitives. Composing them into a working resource is otherwise hand-wiring
-per model: declare the ``<res>_bool_exp`` / ``<res>_order_by`` /
-``<res>_insert_input`` / ``<res>_set_input`` / ``<res>_pk_columns_input``
+The six surfaces (``comparisons`` / ``filtering`` / ``ordering`` /
+``connection`` / ``mutations`` / ``aggregation`` / ``grouping``) are
+model-independent primitives. Composing them into a working resource is
+otherwise hand-wiring per model: declare the ``<res>_bool_exp`` /
+``<res>_order_by`` / ``<res>_insert_input`` / ``<res>_set_input`` /
+``<res>_pk_columns_input``
 inputs, the ``<res>`` / ``<res>_aggregate`` / ``<res>_by_pk`` query fields, the
+optional ``<res>_groups`` / ``<res>_groups_count`` grouped fields, the
 ``insert_<res>_one`` / ``update_<res>_by_pk`` / ``delete_<res>_by_pk``
 mutations, and the free ``<Model>Aggregate`` container — and then pin every
 snake_case wire name.
@@ -166,7 +168,8 @@ class HasuraResource:
     re-templating Hasura's naming convention. ``aggregate_container_type`` is
     the Hasura ``<res>_aggregate`` wrapper; ``aggregate_type`` is its inner
     ``aggregate`` payload (the native ``<Model>Aggregate`` on the model path,
-    the count-only ``<Node>Aggregate`` on the row-source path).
+    the count-only ``<Node>Aggregate`` on the row-source path). Groupable
+    resources expose both ``groups_root`` and the exact ``groups_count_root``.
     """
 
     query: type
@@ -203,6 +206,8 @@ class HasuraResource:
     nested_arr_input_types: Mapping[str, type] = dataclass_field(
         default_factory=dict
     )
+    # Appended for positional-constructor compatibility with <= 0.5.x.
+    groups_count_root: str | None = None
 
 
 def _column_python_type(field: Any) -> Any:
@@ -462,9 +467,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     model's lower-cased name. ``filterable`` / ``sortable`` / ``aggregatable``
     are the column allowlists for ``<res>_bool_exp`` / ``<res>_order_by`` /
     ``<Model>Aggregate``. ``groupable`` enables the optional NDC-shaped
-    ``<res>_groups`` companion root; ``max_groups`` caps its offset page (a
-    high-cardinality dimension would otherwise pull every group — default
-    ``None`` is uncapped; pass ``order_by`` for stable pages). ``writable``
+    ``<res>_groups`` row root and exact ``<res>_groups_count`` companion;
+    ``max_groups`` caps only the row root's offset page (a high-cardinality
+    dimension would otherwise pull every group — default ``None`` is uncapped;
+    pass ``order_by`` for stable pages). ``writable``
     mirrors Hasura field
     permissions for insert / ``_set`` inputs (default: editable concrete model
     columns plus editable many-to-many relation arrays). ``insertable`` and
@@ -682,6 +688,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         aggregate_resolver=aggregate_resolver,
     )
     groups_field: Any = None
+    groups_count_field: Any = None
     groups_types: list[type] = []
     group_type: type | None = None
     group_key_type: type | None = None
@@ -689,7 +696,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     group_order_type: type | None = None
     having_type: type | None = None
     if groupable:
-        groups_field, groups_types = make_groups_field(
+        groups_field, groups_count_field, groups_types = make_groups_field(
             builder=agg_builder,
             built=agg_built,
             resource_name=res,
@@ -768,6 +775,9 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     aggregate_root = f"{res}_aggregate"
     detail_root = f"{res}_by_pk"
     groups_root = f"{res}_groups" if groups_field is not None else None
+    groups_count_root = (
+        f"{res}_groups_count" if groups_count_field is not None else None
+    )
 
     query_fields = {
         list_root: strawberry.field(resolver=resolve_list, name=list_root),
@@ -780,6 +790,8 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     }
     if groups_field is not None and groups_root is not None:
         query_fields[groups_root] = groups_field
+    if groups_count_field is not None and groups_count_root is not None:
+        query_fields[groups_count_root] = groups_count_field
     query = strawberry.type(type(f"{res}__query", (), query_fields))
 
     # --- root mutation fields ------------------------------------------------
@@ -908,6 +920,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         aggregate_root=aggregate_root,
         detail_root=detail_root,
         groups_root=groups_root,
+        groups_count_root=groups_count_root,
         insert_one_root=insert_one_root,
         update_by_pk_root=update_by_pk_root,
         delete_by_pk_root=delete_by_pk_root,

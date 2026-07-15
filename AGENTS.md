@@ -9,7 +9,7 @@ point is [`README.md`](./README.md); the wire contract is
 > `strawberry-django` and `strawberry-django-aggregates`. If a change makes it
 > *more* than thin glue, stop and reconsider.
 
-## Architecture — the five surfaces
+## Architecture — the six surfaces
 
 The package is model-independent primitives plus per-model type declarations the
 consumer writes. The owner of each concern is an existing library; this adapter
@@ -23,6 +23,7 @@ only translates the Hasura vocabulary onto it. The wire convention is
 | Ordering | `ordering.py` | Django `.order_by()` | `[<resource>_order_by!]` (per-field `order_by` enum) → ordering clauses |
 | Pagination | `connection.py` | queryset slicing | bare `limit` / `offset` args → a queryset slice |
 | Aggregation | `aggregation.py` | `strawberry-django-aggregates` (`AggregateBuilder` + `compute_aggregation` + `shape_aggregate_row`) | the **free** `<resource>_aggregate { aggregate, nodes }` — `aggregate` IS the native `<Model>Aggregate` type, zero reshape |
+| Grouping | `grouping.py` | `strawberry-django-aggregates` public grouped translators, shapers, and `count_groups` | preview `<resource>_groups` rows plus exact, unpaginated `<resource>_groups_count` cardinality |
 | Mutations | `mutations.py` | the Django model | the `insert_<r>_one` / `update_<r>_by_pk` / `delete_<r>_by_pk` envelope → model kwargs |
 
 `naming.py` holds the snake_case `NameConverter` + `hasura_config()` (the
