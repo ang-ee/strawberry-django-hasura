@@ -258,14 +258,15 @@ def _comparison_for(
 
 
 def _filterable_path_field(model: type[Model], path: str) -> Any:
-    """Resolve a scalar/to-one filter path to its terminal Django field.
+    """Resolve a filterable declaration to its comparison Django field.
 
-    A direct relation remains the adapter's established scalar-FK comparison
-    (``author: ID_comparison_exp`` or the related key's natural scalar). A
-    nested declaration preserves that model under the exact Django lookup
-    path (``book__author: ID_comparison_exp`` for an auto pk). Every
-    non-terminal segment must therefore be a to-one relation; a to-many hop
-    would row-multiply and is rejected when the resource is built.
+    A direct relation remains the adapter's established related-key
+    comparison (``author: ID_comparison_exp`` or the related key's natural
+    scalar). This includes a direct to-many field, whose exact lookup has
+    Django's membership semantics. A nested declaration preserves that model
+    under the exact Django lookup path (``book__author:
+    ID_comparison_exp`` for an auto pk). Every segment of a multi-segment path
+    must therefore avoid a to-many crossing, which would row-multiply.
 
     Django forbids ``__`` in model field names, so preserving the complete
     declared path as the GraphQL input field is deterministic and cannot
@@ -298,9 +299,10 @@ def _filterable_path_field(model: type[Model], path: str) -> Any:
                 "non-terminal segment must be a to-one relation"
             ) from exc
 
-        if getattr(field, "one_to_many", False) or getattr(
+        to_many = getattr(field, "one_to_many", False) or getattr(
             field, "many_to_many", False
-        ):
+        )
+        if to_many and len(segments) > 1:
             raise FilterablePathError(
                 f"filterable path {path!r} on {model.__name__} crosses "
                 f"to-many relation {segment!r} on "
@@ -309,6 +311,17 @@ def _filterable_path_field(model: type[Model], path: str) -> Any:
             )
 
         if terminal:
+            if to_many:
+                # Before nested paths existed, a direct field was resolved by
+                # ``model._meta.get_field`` and its exact lookup was passed to
+                # Django verbatim. Preserve that membership-filter surface,
+                # deriving the comparison from the related lookup target.
+                target_field = getattr(field, "target_field", None)
+                if target_field is not None:
+                    return target_field
+                related_model = getattr(field, "related_model", None)
+                if related_model is not None:
+                    return related_model._meta.pk
             if isinstance(field, Field):
                 return field
             # A reverse one-to-one relation has no local target_field, but an

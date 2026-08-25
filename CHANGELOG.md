@@ -5,6 +5,17 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-08-25
+
+### Fixed
+
+- **Direct to-many membership filters.** Restored the pre-0.7.0 acceptance of
+  single-segment many-to-many and reverse-FK fields in `filterable`. Their
+  comparison follows the related target key and the exact lookup is passed to
+  Django unchanged, preserving membership semantics and `field_id_decode`.
+  To-many relations remain forbidden anywhere in a multi-segment path,
+  including as its terminal segment.
+
 ## [0.7.0] — 2026-08-25
 
 ### Added
@@ -276,6 +287,7 @@ for the target SDL and [`AGENTS.md`](./AGENTS.md) for the architecture.
   schema built with this library, and an in-memory SQLite test suite covering
   every surface plus the emitted-SDL contract.
 
+[0.7.1]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.7.1
 [0.7.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.7.0
 [0.6.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.6.0
 [0.5.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.5.0

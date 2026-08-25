@@ -49,13 +49,19 @@ composition:
 - composition: `_and: [notes_bool_exp!]`, `_or: [notes_bool_exp!]`,
   `_not: notes_bool_exp`
 
-Model resources may declare a filterable Django path through to-one relations,
-for example `filterable=["project__product"]`. This extends the adapter's
-existing direct-relation convention: a direct FK such as `project` is a scalar
-comparison on the related key (`project: ID_comparison_exp` for Django's
-default auto pk, whose operands are GraphQL `String`), not a nested relation
-bool-exp. The nested path is therefore another scalar comparison in the same
-`<res>_bool_exp`, under its exact collision-free Django lookup name:
+The adapter's direct-relation convention is a scalar comparison on the related
+key: a direct FK such as `project` emits `project: ID_comparison_exp` for
+Django's default auto pk, whose operands are GraphQL `String`. A direct
+single-segment to-many field keeps the same convention. For example,
+`filterable=["groups"]` on a many-to-many relation emits
+`groups: ID_comparison_exp` and applies `_eq` as Django `Q(groups=<operand>)`,
+matching rows that contain that related value. A `field_id_decode["groups"]`
+decoder, when supplied, is applied before the same membership lookup.
+
+Model resources may also declare a filterable Django path through to-one
+relations, for example `filterable=["project__product"]`. The nested path is
+another scalar comparison in the same `<res>_bool_exp`, under its exact
+collision-free Django lookup name:
 
 ```graphql
 input tasks_bool_exp {
@@ -67,12 +73,13 @@ input tasks_bool_exp {
 
 The filter value is applied as the matching Django lookup
 `project__product=<operand>`. Every non-terminal segment must be a to-one
-relation (FK / one-to-one); a to-many hop and an unknown/non-field terminal
-raise `FilterablePathError` while the resource is built. A terminal relation
-uses its target field's scalar type, including a non-ID `to_field`. A path may
-also end at a scalar column (`project__title` compares the CharField with
-`String_comparison_exp`), and a terminal reverse one-to-one resolves to the
-related model's primary key. A full path
+relation (FK / one-to-one), and a to-many relation anywhere in a multi-segment
+path—including its terminal segment—raises `FilterablePathError` while the
+resource is built. An unknown/non-field terminal is rejected likewise. A
+terminal relation uses its target field's scalar type, including a non-ID
+`to_field`. A path may also end at a scalar column (`project__title` compares
+the CharField with `String_comparison_exp`), and a terminal reverse one-to-one
+resolves to the related model's primary key. A full path
 listed in `field_id_decode` uses the same `ID_comparison_exp` while applying its
 caller-supplied public-id decoder, exactly like a direct public-id FK.
 

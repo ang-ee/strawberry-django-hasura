@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 from typing import Any
 
+import pytest
 import strawberry
 import strawberry_django
 from strawberry import auto
@@ -141,7 +142,7 @@ def _book_resource(**kwargs: Any):
         Book,
         model=BookModel,
         name="books",
-        filterable=["id", "title", "author"],
+        filterable=kwargs.pop("filterable", ["id", "title", "author"]),
         sortable=["title", "updated_at"],
         aggregatable=[],
         writable=kwargs.pop("writable", ["title", "author"]),
@@ -519,6 +520,45 @@ def test_nested_boolean_filter_decodes_fk_public_id(db):
     assert listed.data["books"] == [
         {"title": "Compiler Notes", "author": encode_author(author.pk)}
     ]
+
+
+@pytest.mark.parametrize("with_id_decode", [False, True])
+def test_direct_many_to_many_filter_has_membership_semantics(
+    db, with_id_decode
+):
+    """A direct to-many filter remains a related-key membership lookup."""
+    author = AuthorModel.objects.create(name="Ada")
+    wanted = TagModel.objects.create(name="wanted")
+    other = TagModel.objects.create(name="other")
+    matching = BookModel.objects.create(title="Matching", author=author)
+    excluded = BookModel.objects.create(title="Excluded", author=author)
+    matching.tags.add(wanted, other)
+    excluded.tags.add(other)
+    resource = _book_resource(
+        filterable=["title", "tags"],
+        field_id_decode={"tags": decode_tag} if with_id_decode else {},
+    )
+    book_schema = strawberry.Schema(
+        query=resource.query,
+        mutation=resource.mutation,
+        types=[Author, *resource.types],
+    )
+
+    assert "tags: ID_comparison_exp" in _input_block(
+        book_schema.as_str(), "books_bool_exp"
+    )
+    operand = encode_tag(wanted.pk) if with_id_decode else str(wanted.pk)
+    listed = book_schema.execute_sync(
+        """
+        query($where: books_bool_exp) {
+          books(where: $where) { title }
+        }
+        """,
+        variable_values={"where": {"tags": {"_eq": operand}}},
+    )
+
+    assert listed.errors is None, listed.errors
+    assert listed.data["books"] == [{"title": "Matching"}]
 
 
 def test_many_to_many_public_id_fields_write_relation_arrays(db):

@@ -331,6 +331,17 @@ def test_filterable_path_rejects_a_to_many_segment_at_build_time():
         _chapter_resource(filterable=["book__tags__name"])
 
 
+def test_filterable_path_rejects_a_to_many_terminal_at_build_time():
+    with pytest.raises(
+        FilterablePathError,
+        match=(
+            r"filterable path 'book__tags'.*"
+            r"to-many relation 'tags'.*only to-one"
+        ),
+    ):
+        _chapter_resource(filterable=["book__tags"])
+
+
 def test_filterable_path_rejects_an_unknown_terminal_at_build_time():
     with pytest.raises(
         FilterablePathError,

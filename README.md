@@ -170,7 +170,7 @@ aggregate), no patching — using only the `idType: "String"` option.
 
 ## Status
 
-Beta (v0.7.0). The public API (`__init__` exports) and the emitted SDL shape
+Beta (v0.7.1). The public API (`__init__` exports) and the emitted SDL shape
 follow [`CONTRACT.md`](./CONTRACT.md) and are stable for early adopters; minor
 iteration is expected before a 1.0 stability commitment. Runtime: Python 3.14,
 Django 6.0.
