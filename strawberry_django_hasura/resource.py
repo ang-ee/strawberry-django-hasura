@@ -75,6 +75,16 @@ from .mutations import input_to_dict
 from .ordering import apply_ordering
 
 
+class FilterablePathError(ValueError):
+    """A declared filterable path is not scalar/to-one safe.
+
+    Filter paths are schema declarations, so an invalid path is a build-time
+    configuration error rather than a request-time ORM failure.  The named
+    exception lets schema assemblers distinguish that validation failure from
+    an unsupported scalar comparison or another builder error.
+    """
+
+
 class WriteBackend(Protocol):
     """The caller-supplied authorized-write seam for the mutation surface.
 
@@ -245,6 +255,87 @@ def _comparison_for(
     return comparison_for_python_type(
         strawberry.ID if public_id else _column_python_type(field)
     )
+
+
+def _filterable_path_field(model: type[Model], path: str) -> Any:
+    """Resolve a scalar/to-one filter path to its terminal Django field.
+
+    A direct relation remains the adapter's established scalar-FK comparison
+    (``author: ID_comparison_exp`` or the related key's natural scalar). A
+    nested declaration preserves that model under the exact Django lookup
+    path (``book__author: ID_comparison_exp`` for an auto pk). Every
+    non-terminal segment must therefore be a to-one relation; a to-many hop
+    would row-multiply and is rejected when the resource is built.
+
+    Django forbids ``__`` in model field names, so preserving the complete
+    declared path as the GraphQL input field is deterministic and cannot
+    collide with a direct field or another valid path. No parallel nested
+    bool-exp type hierarchy is needed.
+    """
+    segments = path.split("__")
+    if not path or any(not segment for segment in segments):
+        raise FilterablePathError(
+            f"filterable path {path!r} on {model.__name__} is malformed; "
+            "use non-empty Django field names separated by '__'"
+        )
+
+    current_model = model
+    for index, segment in enumerate(segments):
+        terminal = index == len(segments) - 1
+        try:
+            field = current_model._meta.get_field(segment)
+        except FieldDoesNotExist as exc:
+            if terminal:
+                raise FilterablePathError(
+                    f"filterable path {path!r} on {model.__name__} "
+                    f"terminates at {segment!r} on "
+                    f"{current_model.__name__}, which is neither a "
+                    "relation nor a scalar field"
+                ) from exc
+            raise FilterablePathError(
+                f"filterable path {path!r} on {model.__name__} has no "
+                f"segment {segment!r} on {current_model.__name__}; every "
+                "non-terminal segment must be a to-one relation"
+            ) from exc
+
+        if getattr(field, "one_to_many", False) or getattr(
+            field, "many_to_many", False
+        ):
+            raise FilterablePathError(
+                f"filterable path {path!r} on {model.__name__} crosses "
+                f"to-many relation {segment!r} on "
+                f"{current_model.__name__}; only to-one relation paths "
+                "are filterable"
+            )
+
+        if terminal:
+            if isinstance(field, Field):
+                return field
+            # A reverse one-to-one relation has no local target_field, but an
+            # exact relation lookup still compares against the related pk.
+            if getattr(field, "one_to_one", False):
+                related_model = getattr(field, "related_model", None)
+                if related_model is not None:
+                    return related_model._meta.pk
+            raise FilterablePathError(
+                f"filterable path {path!r} on {model.__name__} terminates "
+                f"at {segment!r} on {current_model.__name__}, which is "
+                "neither a to-one relation nor a scalar field"
+            )
+
+        related_model = getattr(field, "related_model", None)
+        is_to_one = getattr(field, "many_to_one", False) or getattr(
+            field, "one_to_one", False
+        )
+        if not is_to_one or related_model is None:
+            raise FilterablePathError(
+                f"filterable path {path!r} on {model.__name__} cannot "
+                f"traverse segment {segment!r} on "
+                f"{current_model.__name__}; it is not a to-one relation"
+            )
+        current_model = related_model
+
+    raise AssertionError("a non-empty filterable path always has a terminal")
 
 
 def _writable_fields(
@@ -466,7 +557,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     resource stem (the plural Hasura name — ``"notes"``); it defaults to the
     model's lower-cased name. ``filterable`` / ``sortable`` / ``aggregatable``
     are the column allowlists for ``<res>_bool_exp`` / ``<res>_order_by`` /
-    ``<Model>Aggregate``. ``groupable`` enables the optional NDC-shaped
+    ``<Model>Aggregate``. A filterable entry may be a ``__`` path through
+    to-one relations; its terminal scalar or relation uses the same comparison
+    input as a direct field and the complete path is its bool-exp field name.
+    ``groupable`` enables the optional NDC-shaped
     ``<res>_groups`` row root and exact ``<res>_groups_count`` companion;
     ``max_groups`` caps only the row root's offset page (a high-cardinality
     dimension would otherwise pull every group — default ``None`` is uncapped;
@@ -511,8 +605,6 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         node_definition.name if node_definition is not None else model.__name__
     )
     module = _host_module(res)
-    get_field = model._meta.get_field
-
     # --- where / order_by inputs (derived from the Django fields) ------------
     # ``id`` is the fixed refine ``idType`` wire name (not the Django column,
     # which is ``id_column``): its comparison is always ``IDComparison`` (the
@@ -525,7 +617,8 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
                 IDComparison
                 if col == _ID_WIRE_NAME
                 else _comparison_for(
-                    get_field(col), public_id=col in public_id_fields
+                    _filterable_path_field(model, col),
+                    public_id=col in public_id_fields,
                 )
             )
             for col in filterable

@@ -22,6 +22,7 @@ from .mutations import input_to_dict
 from .naming import SnakeNameConverter, hasura_config
 from .ordering import OrderBy, apply_ordering, order_clauses
 from .resource import (
+    FilterablePathError,
     HasuraResource,
     NestedInsert,
     WriteBackend,
@@ -36,6 +37,7 @@ from .run_query import (
 )
 
 __all__ = [
+    "FilterablePathError",
     "HasuraResource",
     "InMemoryRowSource",
     "NestedInsert",

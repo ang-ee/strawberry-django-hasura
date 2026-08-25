@@ -5,6 +5,30 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-08-25
+
+### Added
+
+- **Nested to-one filterable paths.** `hasura_resource(filterable=[...])` now
+  accepts exact Django `__` paths whose non-terminal segments are to-one
+  relations, such as `project__product`. The path is emitted as a scalar
+  comparison field on the existing `<res>_bool_exp`
+  (`project__product: ID_comparison_exp` for a default auto-pk terminal FK),
+  matching the established direct-FK shape rather than introducing a second
+  relation filtering model. Terminal FK group keys such as
+  `project__product_id` can be passed directly to
+  `where: {project__product: {_eq: ...}}` on the default raw-key boundary.
+- **Named filter-path validation.** `FilterablePathError` is raised while the
+  resource is built if a declared path crosses a to-many relation, contains a
+  non-relation traversal segment, is malformed, or ends at an unknown/
+  non-scalar attribute. The error is part of the public package API.
+
+### Changed
+
+- Direct scalar and direct relation filterables retain their existing input
+  types and query behavior. Full nested paths may be keys in
+  `field_id_decode` when their terminal relation uses a public id.
+
 ## [0.6.0] — 2026-07-15
 
 ### Added
@@ -252,6 +276,7 @@ for the target SDL and [`AGENTS.md`](./AGENTS.md) for the architecture.
   schema built with this library, and an in-memory SQLite test suite covering
   every surface plus the emitted-SDL contract.
 
+[0.7.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.7.0
 [0.6.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.6.0
 [0.5.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.4.0

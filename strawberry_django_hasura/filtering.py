@@ -4,7 +4,9 @@ The owner of filtering is the Django ORM; this module only maps the bounded
 Hasura operator vocabulary onto ORM lookups (the map in ``CONTRACT.md``). A
 Hasura ``bool_exp`` is ``{<field>: <comparison>, _and: [...], _or: [...], _not:
 ...}``; the python attr name of a scalar field equals its Django column (both
-snake_case), so no field-name remap is needed for scalar columns.
+snake_case). Model resources may also expose an exact Django ``__`` lookup path
+through to-one relations, so no field-name remap is needed for scalar columns
+or validated nested paths.
 
 The public ``id`` column is the one place a project may diverge: if ``id`` is
 an opaque sqid (rather than the raw pk), the operand must be decoded to the pk
@@ -226,8 +228,9 @@ def where_to_q(
     ``id_column`` maps the GraphQL ``id`` field to its Django column (default
     ``pk``); ``id_decode`` decodes a sqid operand to the pk before the lookup.
     ``field_decoders`` applies the same public-id boundary to any other scalar
-    field, such as a foreign-key column exposed as a public id. Both default to
-    a raw-pk project; a sqid project passes its codecs.
+    field or validated ``__`` path, such as a foreign-key column exposed as a
+    public id. Both default to a raw-pk project; a sqid project passes its
+    codecs.
     """
     if where is None or where is UNSET:
         return Q()
