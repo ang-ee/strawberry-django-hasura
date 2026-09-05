@@ -5,6 +5,21 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-09-05
+
+### Added
+
+- Explicit `sortable_aliases` map allowlisted wire fields to source-owned
+  queryset annotations. Invalid or colliding declarations fail at schema
+  construction; selected missing annotations fail before query execution.
+  Native Django expressions and scoped querysets remain the consumer's owner.
+
+### Fixed
+
+- Explicit ORM list ordering appends the model primary key when absent,
+  keeping ties stable across offset pages while preserving a selected PK
+  direction. Source ordering without a wire order remains unchanged.
+
 ## [0.8.1] — 2026-09-05
 
 ### Fixed

@@ -385,3 +385,28 @@ def test_filterable_path_rejects_an_unknown_terminal_at_build_time():
         ),
     ):
         _chapter_resource(filterable=["book__publisher"])
+
+
+def test_declared_sort_alias_is_a_wire_enum_field_only():
+    resource = hasura_resource(
+        FilterableChapter,
+        model=ChapterModel,
+        name="sort_chapters",
+        filterable=["title"],
+        sortable=["display_title"],
+        sortable_aliases={"display_title": "_title"},
+        aggregatable=[],
+        get_queryset=lambda info: ChapterModel.objects.all(),
+        write_backend=_NoWrites(),
+        insert=False,
+        update=False,
+        delete=False,
+    )
+    sdl = strawberry.Schema(
+        query=resource.query, types=resource.types
+    ).as_str()
+    assert (
+        "input sort_chapters_order_by {\n  display_title: order_by\n}" in sdl
+    )
+    assert "\n  _title:" not in sdl
+    assert "order_by: [sort_chapters_order_by!]" in sdl

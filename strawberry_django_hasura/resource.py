@@ -565,6 +565,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     filterable: list[str],
     sortable: list[str],
     aggregatable: list[str],
+    sortable_aliases: Mapping[str, str] | None = None,
     aggregate_name: str | None = None,
     groupable: list[str] | None = None,
     json_paths: Mapping[str, str] | None = None,
@@ -597,6 +598,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     ``<Model>Aggregate``. A filterable entry may be a ``__`` path through
     to-one relations; its terminal scalar or relation uses the same comparison
     input as a direct field and the complete path is its bool-exp field name.
+    ``sortable_aliases`` maps declared sortable wire fields to existing
+    queryset annotation names. The source owns their expressions and row
+    cardinality; selected aliases fail if the source omits their annotation.
+    Alias names cannot collide with native model fields or the public id.
     ``groupable`` enables the optional NDC-shaped
     ``<res>_groups`` row root and exact ``<res>_groups_count`` companion;
     ``max_groups`` caps only the row root's offset page (a high-cardinality
@@ -641,6 +646,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     res = name or model.__name__.lower()
     capped_limit(None, max_rows)
     capped_limit(None, max_groups)
+    active_sortable_aliases = dict(sortable_aliases or {})
     active_json_paths = dict(json_paths or {})
     active_encoders = dict(group_key_encoders or {})
     active_lookups = _filter_lookups(filter_lookups)
@@ -690,7 +696,12 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         },
         module,
     )
-    validate_sortable(model, sortable, id_column=id_column)
+    validate_sortable(
+        model,
+        sortable,
+        id_column=id_column,
+        sortable_aliases=active_sortable_aliases,
+    )
     order_by_input = build_order_by(res, sortable, module)
 
     insert_fields = _writable_fields(
@@ -895,7 +906,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         offset: int | None = None,
     ) -> Any:
         qs = apply_ordering(
-            filtered(info, where), order_by, id_column=id_column
+            filtered(info, where),
+            order_by,
+            id_column=id_column,
+            sortable_aliases=active_sortable_aliases,
         )
         return _optimize_queryset(
             paginate(qs, limit, offset, maximum=max_rows), info
