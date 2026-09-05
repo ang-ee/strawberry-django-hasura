@@ -58,12 +58,12 @@ def decode_sqid(sqid: str) -> int:
 @strawberry_django.type(NoteModel)
 class Note:  # GraphQL type name is `Note`
     title: auto
-    word_count: auto
-    is_starred: auto
+    word_count: auto = strawberry_django.field(name="word_count")
+    is_starred: auto = strawberry_django.field(name="is_starred")
     status: auto
     metadata: auto
     price: auto
-    updated_at: auto
+    updated_at: auto = strawberry_django.field(name="updated_at")
 
     @strawberry.field
     def id(self) -> strawberry.ID:  # public id == sqid
@@ -142,6 +142,7 @@ resource = hasura_resource(
     ],
     sortable=["title", "word_count", "price", "updated_at"],
     aggregatable=["word_count", "price"],
+    aggregate_name="Note",
     groupable=["status", "updated_at"],
     get_queryset=get_queryset,
     write_backend=NoteWriteBackend(),
@@ -150,7 +151,8 @@ resource = hasura_resource(
 
 
 # NOTE: no ``config=hasura_config()``. The builder pins the snake_case wire
-# names itself (per field / argument / aggregate-type field), so the resource
+# names itself (per generated field / argument / aggregate-type field), while
+# the node explicitly names its snake_case output fields. The resource
 # is correct on a stock *camelCase* schema — proving a consumer like Angee,
 # which cannot install a schema-wide snake-case converter, gets snake_case
 # wire names for the Hasura surface for free. ``hasura_config()`` stays an

@@ -38,12 +38,6 @@ its `group_by` SDL. The stock list / aggregate / CRUD SDL is unaffected
   either restricting the Hasura dialect's default operator set to portable,
   no-arg ops, or threading an `op_args` fraction channel through the aggregate
   and groups resolvers.
-- **`json_paths` parity in the free-aggregate resolver.** `grouping.py` passes
-  `json_paths=builder.json_paths` to `shape_aggregate_row`; `aggregation.py`'s
-  free-aggregate resolver does not (its `build_aggregate_type` path keeps no
-  builder handle). Dormant while no `json_paths` knob is exposed; wire it
-  through if JSON-path *measures* (distinct from the already-shipped JSON
-  `_contains` *filter*) are ever enabled.
 
 ## Dependency / release
 

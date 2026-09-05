@@ -10,6 +10,8 @@ required to run the suite.
 
 from __future__ import annotations
 
+import os
+
 DEBUG = True
 
 DATABASES = {
@@ -18,6 +20,18 @@ DATABASES = {
         "NAME": ":memory:",
     },
 }
+
+if os.environ.get("SDH_TEST_POSTGRES") == "1":
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("PGDATABASE", "sdh_tests"),
+            "USER": os.environ.get("PGUSER", "postgres"),
+            "PASSWORD": os.environ.get("PGPASSWORD", "postgres"),
+            "HOST": os.environ.get("PGHOST", "127.0.0.1"),
+            "PORT": os.environ.get("PGPORT", "5432"),
+        }
+    }
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",

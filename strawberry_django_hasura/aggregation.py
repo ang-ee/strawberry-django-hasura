@@ -25,7 +25,7 @@ strawberry-django filter inputs, not a hand-shaped Hasura ``bool_exp``).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 import strawberry
@@ -35,6 +35,7 @@ from strawberry_django_aggregates import (
     AggregateBuilder,
     AggregateOp,
     compute_aggregation,
+    group_by_alias,
     shape_aggregate_row,
 )
 
@@ -51,6 +52,7 @@ def build_aggregate_type(
     *,
     name: str | None = None,
     aggregate_fields: list[str] | None = None,
+    json_paths: Mapping[str, str] | None = None,
 ) -> type:
     """Return the native ``<Model>Aggregate`` strawberry type for a model.
 
@@ -60,7 +62,10 @@ def build_aggregate_type(
     type-name prefix (defaults to the model name).
     """
     built = AggregateBuilder(
-        model=model, name_prefix=name, aggregate_fields=aggregate_fields
+        model=model,
+        name_prefix=name,
+        aggregate_fields=aggregate_fields,
+        json_paths=dict(json_paths or {}),
     ).build()
     # ``aggregate_type`` is ``Any`` across the untyped-import seam (the
     # aggregates library ships no ``py.typed`` yet); it is a strawberry type.
@@ -85,6 +90,7 @@ def _selected_fields(selections: list[Selection]) -> list[SelectedField]:
 
 def _ops_from_aggregate_blocks(
     blocks: list[SelectedField],
+    json_paths: Mapping[str, str] | None = None,
 ) -> list[tuple[AggregateOp, str | None]]:
     """Map selected ``aggregate`` sub-fields to deduped ``(op, field)`` pairs.
 
@@ -95,6 +101,7 @@ def _ops_from_aggregate_blocks(
     preserving first-seen order (deterministic SQL). Shared by the free
     ``<res>_aggregate`` resolver and the grouped ``<res>_groups`` resolver.
     """
+    aliases = {group_by_alias(path, None): path for path in json_paths or {}}
     requested: list[tuple[AggregateOp, str | None]] = []
     for block in blocks:
         op = _OP_FROM_WIRE.get(block.name)
@@ -104,7 +111,9 @@ def _ops_from_aggregate_blocks(
             requested.append((op, None))
             continue
         for member in _selected_fields(block.selections):
-            requested.append((op, member.name))
+            if member.name.startswith("__"):
+                continue
+            requested.append((op, aliases.get(member.name, member.name)))
     if (AggregateOp.COUNT, None) not in requested:
         requested.insert(0, (AggregateOp.COUNT, None))
     seen: set[tuple[AggregateOp, str | None]] = set()
@@ -118,6 +127,7 @@ def _ops_from_aggregate_blocks(
 
 def _requested_ops(
     info: strawberry.Info,
+    json_paths: Mapping[str, str] | None = None,
 ) -> list[tuple[AggregateOp, str | None]]:
     """Walk the ``aggregate { … }`` selection into ``(op, field)`` pairs.
 
@@ -129,11 +139,13 @@ def _requested_ops(
         for top in info.selected_fields
         for block in _selected_fields(top.selections)
     ]
-    return _ops_from_aggregate_blocks(blocks)
+    return _ops_from_aggregate_blocks(blocks, json_paths)
 
 
 def make_aggregate_resolver(
     aggregate_type: type,
+    *,
+    json_paths: Mapping[str, str] | None = None,
 ) -> Callable[[strawberry.Info, Callable[[Any], QuerySet[Any]]], Any]:
     """Build the ``aggregate`` resolver for a model's ``<Model>Aggregate``.
 
@@ -145,12 +157,20 @@ def make_aggregate_resolver(
     container hands it — the same filtered queryset its ``nodes`` field uses).
     """
 
+    active_json_paths = dict(json_paths or {})
+
     def resolve(
         info: strawberry.Info, get_queryset: Callable[[Any], QuerySet[Any]]
     ) -> Any:
-        requested = _requested_ops(info)
-        rows = compute_aggregation(get_queryset(info), aggregates=requested)
+        requested = _requested_ops(info, active_json_paths)
+        rows = compute_aggregation(
+            get_queryset(info),
+            aggregates=requested,
+            json_paths=active_json_paths,
+        )
         row = rows[0] if rows else {}
-        return shape_aggregate_row(aggregate_type, row, requested)
+        return shape_aggregate_row(
+            aggregate_type, row, requested, json_paths=active_json_paths
+        )
 
     return resolve

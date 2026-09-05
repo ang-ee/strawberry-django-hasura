@@ -5,6 +5,49 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-09-05
+
+### Fixed
+
+- Non-editable many-to-many fields are excluded from generated mutation inputs
+  and rejected in explicit allowlists.
+- To-many filters retain one parent row across lists, pagination, nodes,
+  aggregate measures, groups, and exact group counts.
+- ORM roots support sync and async execution through Strawberry Django's
+  resolver boundary; row selections are optimized before safe evaluation.
+- `__typename` selections no longer reach the aggregate measure compiler.
+- Resource construction preserves caller-owned output types and isolates
+  recursive input namespaces between independent schemas.
+- Public-ID ordering supports custom primary keys; invalid and to-many sort
+  paths fail at construction.
+- Forward one-to-one writable inputs use their target scalar, file inputs use
+  the upstream `Upload` mapping, and database-defaulted columns may be omitted.
+- In-memory sources refresh scoped rows for each resolution rather than
+  retaining them on potentially multi-operation contexts. Enum/UUID filtering,
+  JSON structural comparisons, and empty boolean branches follow the declared
+  comparison contract.
+
+### Added
+
+- Resource-local `json_paths`, `group_key_encoders`, and `filter_lookups`,
+  composed with the native aggregate library's public configuration seams.
+- `max_rows` caps list and aggregate-node responses while preserving exact
+  aggregate totals; `max_groups` continues to cap only grouped pages.
+- SQLite and PostgreSQL CI, async execution and tenant-isolation regressions,
+  and an isolated installed-wheel smoke test gate publication.
+
+### Changed
+
+- Aggregate/group type prefixes default to the exact resource stem to avoid
+  collisions when resources share a node. Pass `aggregate_name="Note"` to
+  retain a legacy prefix, keeping custom prefixes unique within a schema.
+- Caller-owned output fields must declare their snake_case names explicitly
+  or use the schema's `hasura_config()` converter.
+- Date and Time filters use their matching scalar comparison inputs.
+- Explicit null comparison operands and negative pagination values raise;
+  omit an operator or use `_is_null: true` / `false` for null tests.
+- Requires the published `strawberry-django-aggregates >= 0.11.0` APIs.
+
 ## [0.7.1] — 2026-08-25
 
 ### Fixed

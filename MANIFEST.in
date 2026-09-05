@@ -1,0 +1,3 @@
+include AGENTS.md CHANGELOG.md CONTRACT.md uv.lock
+recursive-include tests *.py
+include scripts/smoke_wheel.py

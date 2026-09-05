@@ -37,7 +37,7 @@ class _AddonRow:
 class PlatformAddon:
     id: strawberry.ID
     label: str
-    model_count: int
+    model_count: int = strawberry.field(name="model_count")
 
 
 _ROWS = [
@@ -81,7 +81,7 @@ def test_run_query_resource_exposes_role_metadata() -> None:
     assert _graphql_name(resource.aggregate_container_type) == (
         "platform_addons_aggregate"
     )
-    assert _graphql_name(resource.aggregate_type) == "PlatformAddonAggregate"
+    assert _graphql_name(resource.aggregate_type) == "platform_addonsAggregate"
     assert resource.insert_input_type is None
     assert resource.set_input_type is None
     assert resource.pk_columns_input_type is None
@@ -227,7 +227,7 @@ def test_decimal_maps_to_decimal_and_nulls_sort_first_on_asc() -> None:
     assert [row["id"] for row in result.data["things"]] == ["a", "b"]
 
 
-def test_empty_not_matches_all_and_null_operand_is_noop() -> None:
+def test_empty_not_matches_all_and_null_operand_is_rejected() -> None:
     schema = _schema()
     empty_not = schema.execute_sync(
         "{ platform_addons(where: {_not: {}}) { id } }"
@@ -237,8 +237,8 @@ def test_empty_not_matches_all_and_null_operand_is_noop() -> None:
     null_operand = schema.execute_sync(
         "{ platform_addons(where: {model_count: {_gt: null}}) { id } }"
     )
-    assert null_operand.errors is None, null_operand.errors  # no crash, no-op
-    assert len(null_operand.data["platform_addons"]) == 3
+    assert null_operand.errors is not None
+    assert "does not accept null" in str(null_operand.errors[0])
 
 
 def test_camelcase_node_field_is_filtered_by_python_attr() -> None:
@@ -317,9 +317,7 @@ def test_int_id_by_pk_and_eq_filter_agree() -> None:
     assert [r["id"] for r in in_.data["int_things"]] == ["1", "2"]
 
 
-def test_cross_type_datetime_comparison_does_not_crash() -> None:
-    # DateTimeComparison maps both date and datetime; a date row vs a datetime
-    # operand is uncomparable and must exclude the row, not crash the query.
+def test_date_comparison_preserves_the_date_scalar() -> None:
     @dataclasses.dataclass
     class _EventRow:
         id: str
@@ -342,10 +340,11 @@ def test_cross_type_datetime_comparison_does_not_crash() -> None:
         query=resource.query, types=[Event, *resource.types]
     )
     result = schema.execute_sync(
-        '{ events(where: {on: {_gt: "2019-01-01T00:00:00"}}) { id } }'
+        '{ events(where: {on: {_gt: "2019-01-01"}}) { id } }'
     )
     assert result.errors is None, result.errors
-    assert result.data["events"] == []
+    assert result.data["events"] == [{"id": "e1"}]
+    assert "on: Date_comparison_exp" in str(schema)
 
 
 def test_empty_or_matches_all() -> None:

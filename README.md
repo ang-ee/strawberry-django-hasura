@@ -73,10 +73,10 @@ from strawberry_django_hasura import hasura_resource
 from .models import Note  # your Django model
 
 
-@strawberry_django.type(Note)
+@strawberry_django.type(Note, name="Note")
 class NoteType:           # GraphQL type name `Note`
     title: auto
-    word_count: auto
+    word_count: auto = strawberry_django.field(name="word_count")
     status: auto
 
     @strawberry.field
@@ -87,19 +87,27 @@ class NoteType:           # GraphQL type name `Note`
 def get_queryset(info):
     # Apply your row-level (e.g. REBAC) scoping here — reads + the aggregate
     # run on this; the builder applies the Hasura `where` on top.
-    return Note.objects.all()
+    return Note.objects.filter(owner=info.context.request.user)
 
 
 class NoteWriteBackend:               # the authorized-write seam (a Protocol)
     def create(self, info, data):     # insert_notes_one(object:)
-        return Note.objects.create(**data)
+        obj = Note(owner=info.context.request.user, **data)
+        obj.full_clean()
+        obj.save()
+        return obj
     def update(self, info, pk, data): # update_notes_by_pk(pk_columns:, _set:)
-        obj = Note.objects.get(pk=decode_sqid(pk))
+        obj = get_queryset(info).get(pk=decode_sqid(pk))
         for k, v in data.items(): setattr(obj, k, v)
-        obj.save(update_fields=[*data]); return obj
+        obj.full_clean()
+        obj.save(update_fields=[*data])
+        return obj
     def delete(self, info, pk):       # delete_notes_by_pk(id:)
-        obj = Note.objects.filter(pk=decode_sqid(pk)).first()
-        if obj: obj.delete()
+        obj = get_queryset(info).filter(pk=decode_sqid(pk)).first()
+        if obj:
+            original_pk = obj.pk
+            obj.delete()
+            obj.pk = original_pk  # preserve the response's public ID
         return obj
 
 
@@ -110,6 +118,10 @@ resource = hasura_resource(
     filterable=["id", "title", "word_count", "status"],
     sortable=["title", "word_count"],
     aggregatable=["word_count"],
+    aggregate_name="Note",          # optional legacy type prefix
+    insertable=["title", "word_count", "status"],
+    updatable=["title", "word_count", "status"],
+    max_rows=100,
     get_queryset=get_queryset,
     write_backend=NoteWriteBackend(),
     id_decode=decode_sqid,            # omit for a raw-pk project
@@ -120,13 +132,54 @@ schema = strawberry.Schema(
 )
 ```
 
+This example assumes an `owner` field and an authenticated request context.
+The backend must also authorize any supplied relation IDs and existing nested
+child IDs. Use transactions for related writes and locking or optimistic
+concurrency when an invariant spans a read and a write. Model validation and
+database constraints complement those authorization checks.
+
 `hasura_resource` derives the comparison / order scalar of each column from the
 **Django field**, and the `insert` / `_set` writable fields from the model's
 editable, non-pk, non-auto concrete fields plus editable many-to-many relation
 arrays. Because it pins each wire name itself, the
-resource is correct on a stock *camelCase* schema (e.g. an Angee schema) with no
-schema-wide converter — `hasura_config()` (below) stays an optional convenience
-for a schema dedicated to a single dialect.
+generated inputs and roots are correct on a stock *camelCase* schema. Output
+node types belong to the consumer: explicitly name snake_case output fields,
+as above, or use `hasura_config()` on a schema dedicated to this dialect. The
+builder never changes a shared output type's names.
+
+### Execution and resource limits
+
+Generated ORM roots support synchronous and asynchronous Strawberry execution
+through Strawberry Django's resolver facilities. Enable
+`DjangoOptimizerExtension` for nested selections. Authorization still belongs
+in the source and backend callbacks.
+
+`max_rows` optionally caps lists and aggregate `nodes`; `max_groups` caps group
+rows. Aggregate math and group counts remain exact and unpaged. Negative
+limits, offsets, or configured maxima raise. Both limits default to `None`, so
+configure them for externally exposed resources and enforce document/input
+size, depth, alias, filter cardinality, and execution budgets in your app.
+
+`InMemoryRowSource` calls its source for each list/count resolution and does
+not retain rows on a context that may span multiple operations. A consumer
+may memoize within a source whose lifetime is explicitly one operation.
+
+### Upgrading to 0.8
+
+- Aggregate and grouping type prefixes now default to the exact resource name
+  (`notesAggregate`, `notesGroupKey`, and so on). Both builders accept
+  `aggregate_name="Note"` to retain a legacy prefix; custom prefixes must be
+  unique within a schema. Root operation names and aggregate shapes stay the
+  same, and the native aggregate type still comes from its upstream builder.
+- Output node names are no longer modified as a side effect of resource
+  construction. Name snake_case fields explicitly or use `hasura_config()`.
+- Date and time columns use `Date_comparison_exp` and `Time_comparison_exp`.
+  Explicitly null comparison operators raise; omit the operator or use
+  `_is_null: true` / `_is_null: false`.
+- Non-editable M2M fields are excluded from writes. Forward one-to-one inputs
+  use their target scalar, file inputs use Strawberry's `Upload`, and database
+  defaulted fields may be omitted. Enable multipart uploads only through your
+  application's authenticated, CSRF-protected upload integration.
 
 ### The primitives (custom assembly)
 
@@ -142,9 +195,10 @@ step off the one-call path.
 
 If your public `id` is an opaque sqid (not the raw pk), keep the output
 `id: ID!` field encoded, and pass `id_decode` to `hasura_resource` — the builder
-decodes `where: { id: { _eq } }` and `notes_by_pk` / `pk_columns.id` before the
+decodes `where: { id: { _eq } }` and `notes_by_pk` before the
 lookup, and the pk-arg surface is typed GraphQL `String` (matching
-`idType: "String"`). The encode/decode and the per-write decode (in your
+`idType: "String"`). The encode/decode and per-write decode (including
+`pk_columns.id`, in your
 `write_backend`) stay your concern — the adapter never inspects a value to guess
 whether it is a sqid.
 
@@ -170,7 +224,7 @@ aggregate), no patching — using only the `idType: "String"` option.
 
 ## Status
 
-Beta (v0.7.1). The public API (`__init__` exports) and the emitted SDL shape
+Beta (v0.8.0). The public API (`__init__` exports) and the emitted SDL shape
 follow [`CONTRACT.md`](./CONTRACT.md) and are stable for early adopters; minor
 iteration is expected before a 1.0 stability commitment. Runtime: Python 3.14,
 Django 6.0.

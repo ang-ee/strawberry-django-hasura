@@ -20,6 +20,7 @@ import decimal
 import sys
 import types
 import uuid
+from itertools import count
 from typing import Any, cast
 
 import strawberry
@@ -29,6 +30,7 @@ from strawberry.types import get_object_definition
 
 from .comparisons import (
     BooleanComparison,
+    DateComparison,
     DateTimeComparison,
     DecimalComparison,
     FloatComparison,
@@ -36,12 +38,15 @@ from .comparisons import (
     IntComparison,
     JSONComparison,
     StringComparison,
+    TimeComparison,
 )
 from .ordering import OrderBy
 
 #: The fixed refine ``idType`` wire field name: its comparison is always
 #: ``IDComparison`` (the String-typed pk surface) — see ``CONTRACT.md``.
 ID_WIRE_NAME = "id"
+
+_MODULE_IDS = count()
 
 #: The fact this module owns: the Hasura ``*_comparison_exp`` input for each
 #: python scalar (its filter operator vocabulary). ``strawberry.ID`` is the
@@ -54,8 +59,8 @@ COMPARISON_FOR_TYPE: dict[Any, type] = {
     decimal.Decimal: DecimalComparison,
     bool: BooleanComparison,
     datetime.datetime: DateTimeComparison,
-    datetime.date: DateTimeComparison,
-    datetime.time: DateTimeComparison,
+    datetime.date: DateComparison,
+    datetime.time: TimeComparison,
     strawberry.ID: IDComparison,
     JSON: JSONComparison,
 }
@@ -84,16 +89,23 @@ def comparison_for_python_type(
 def pin_snake_wire_names(
     strawberry_type: type,
     seen: set[int] | None = None,
+    *,
+    recursive: bool = False,
 ) -> None:
     """Pin each field's GraphQL wire name to its snake_case python name.
 
-    Walks the type (and its nested object types) and, where strawberry would
+    Walks the type and, where strawberry would
     otherwise camelCase a snake_case python identifier, pins the verbatim snake
     name. An explicit ``strawberry.field(name=...)`` already set a
     ``graphql_name`` and is left untouched. Same wire effect as
     :func:`~strawberry_django_hasura.naming.hasura_config`, scoped to the
     generated types, so a consumer on a camelCase schema gets snake_case wire
     names for the resource without a schema-wide converter.
+
+    Recurse only for an entirely generated type graph, such as an aggregate.
+    Root fields return caller-owned node types, which must keep their names
+    when reused elsewhere. Callers explicitly name their output fields or
+    install ``hasura_config()`` on their schema.
     """
     definition = get_object_definition(strawberry_type)
     if definition is None:
@@ -109,12 +121,14 @@ def pin_snake_wire_names(
         for arg in field.arguments:
             if arg.graphql_name is None and "_" in arg.python_name:
                 arg.graphql_name = arg.python_name
+        if not recursive:
+            continue
         inner = field.type
         while hasattr(inner, "of_type"):
             inner = inner.of_type
         nested = get_object_definition(inner)
         if nested is not None and nested is not definition:
-            pin_snake_wire_names(cast("type", inner), seen)
+            pin_snake_wire_names(cast("type", inner), seen, recursive=True)
 
 
 def host_module(name: str) -> types.ModuleType:
@@ -125,11 +139,12 @@ def host_module(name: str) -> types.ModuleType:
     module globals at schema-build time, so the generated types must live in a
     real, importable module namespace.
     """
-    module_name = f"{__name__}._generated.{name}"
-    module = sys.modules.get(module_name)
-    if module is None:
-        module = types.ModuleType(module_name)
-        sys.modules[module_name] = module
+    # Independent schemas may build the same resource name with different
+    # inputs before either schema resolves the recursive annotations. A fresh
+    # namespace prevents the later resource replacing the earlier self-ref.
+    module_name = f"{__name__}._generated.{name}_{next(_MODULE_IDS)}"
+    module = types.ModuleType(module_name)
+    sys.modules[module_name] = module
     return module
 
 
