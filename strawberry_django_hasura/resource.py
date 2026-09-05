@@ -60,7 +60,7 @@ from .connection import (
     paginate,
 )
 from .filtering import _filter_lookups, filter_queryset, where_to_q
-from .grouping import make_groups_field
+from .grouping import GroupByExpressionProvider, make_groups_field
 from .inputs import (
     ID_WIRE_NAME as _ID_WIRE_NAME,
 )
@@ -570,6 +570,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     groupable: list[str] | None = None,
     json_paths: Mapping[str, str] | None = None,
     group_key_encoders: Mapping[str, Callable[[Any], Any]] | None = None,
+    get_group_by_expressions: GroupByExpressionProvider | None = None,
     filter_lookups: Mapping[str, tuple[str, bool]] | None = None,
     max_groups: int | None = None,
     max_rows: int | None = None,
@@ -607,6 +608,11 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     ``max_groups`` caps only the row root's offset page (a high-cardinality
     dimension would otherwise pull every group — default ``None`` is uncapped;
     pass ``order_by`` for stable pages).
+    ``get_group_by_expressions(info, queryset, spec)`` receives every
+    translated selected axis and may supply ORM expressions for selected
+    forward to-one scalar or date group paths. The same hook serves grouped
+    rows and exact group counts; authorization inside an expression remains
+    the caller's responsibility.
     ``max_rows`` caps list and aggregate-node pages while keeping aggregate
     math unpaged. ``aggregate_name`` overrides the resource-stem prefix used
     for native aggregate and grouping types; choose a unique prefix in the
@@ -884,6 +890,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             max_groups=max_groups,
             group_key_encoders=active_encoders,
             filter_lookups=active_lookups,
+            get_group_by_expressions=get_group_by_expressions,
         )
         # Pin snake_case on the generated group types — the query walk reaches
         # the group container + key (a return type) but not the ``having`` /

@@ -350,6 +350,12 @@ type notes_group {
   `having` semantics with `<res>_groups`, but deliberately has no ordering,
   limit, or offset. It delegates to the aggregation owner's database-side
   count path and never materializes every group row in Python.
+- **Caller expressions.** `get_group_by_expressions(info, queryset, spec)`
+  receives every translated selected axis. It may return ORM overrides only
+  for selected forward to-one scalar or date paths. The same hook and filtered
+  queryset feed grouped rows and exact counts; the aggregate owner retains
+  validation, aliases, HAVING, ordering, and paging. Expression authorization
+  remains caller-owned.
 - **Preview:** the DDN GraphQL `group_by` SDL is unpublished (Hasura
   `graphql-engine#10786`), so these field/argument names may change to track it.
   The stock list / aggregate / CRUD SDL above is unaffected (grouping is purely

@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 import strawberry
 import strawberry_django
+from django.db import models
 from strawberry import auto
 from strawberry.types import get_object_definition
 
@@ -653,6 +654,107 @@ def test_groups_support_relation_path_dimensions(db):
         for group in result.data["books_groups"]
     }
     assert counts == {"Ada": 2, "Grace": 1}
+
+
+def test_group_expression_provider_serves_rows_and_exact_count(db):
+    """Selected relation axes share caller expressions across both roots."""
+
+    author = AuthorModel.objects.create(name="Ada")
+    other = AuthorModel.objects.create(name="Grace")
+    BookModel.objects.create(title="A", author=author)
+    BookModel.objects.create(title="B", author=author)
+    BookModel.objects.create(title="C", author=other)
+    calls: list[tuple[str, str, type, tuple[tuple[str, Any], ...], bool]] = []
+
+    def group_by_expressions(info, queryset, spec):
+        calls.append(
+            (
+                info.context["label"],
+                info.field_name,
+                queryset.model,
+                tuple(spec),
+                bool(queryset.query.where.children),
+            )
+        )
+        return {
+            "author__name": models.Case(
+                models.When(
+                    author_id=author.pk,
+                    then=models.Value(info.context["label"]),
+                ),
+                default=models.Value(None),
+                output_field=models.CharField(),
+            ),
+            "author__id": models.Value(42, output_field=models.IntegerField()),
+        }
+
+    resource = _book_resource(
+        groupable=["author__name", "author__id"],
+        get_group_by_expressions=group_by_expressions,
+    )
+    book_schema = strawberry.Schema(
+        query=resource.query,
+        mutation=resource.mutation,
+        types=resource.types,
+    )
+    ordinary = book_schema.execute_sync(
+        """
+        query {
+          books(limit: 1) { title }
+          books_aggregate { aggregate { count } }
+        }
+        """,
+        context_value={"label": "unused"},
+    )
+    assert ordinary.errors is None, ordinary.errors
+    assert calls == []
+
+    query = """
+        query {
+          total: books_groups_count(
+            group_by: [{ field: AUTHOR__NAME }, { field: AUTHOR__ID }],
+            where: {title: {_neq: "Never"}},
+            having: {count_gt: 1}
+          )
+          page: books_groups(
+            group_by: [{ field: AUTHOR__NAME }, { field: AUTHOR__ID }],
+            where: {title: {_neq: "Never"}},
+            having: {count_gt: 1},
+            order_by: [{field: "author__name", nulls: LAST}],
+            limit: 1,
+            offset: 0
+          ) {
+            key { author__name author__id }
+            aggregate { count }
+          }
+        }
+        """
+
+    result = book_schema.execute_sync(
+        query, context_value={"label": "Readable"}
+    )
+    owner_result = book_schema.execute_sync(
+        query, context_value={"label": "Owner"}
+    )
+
+    assert result.errors is None, result.errors
+    assert owner_result.errors is None, owner_result.errors
+    assert result.data == {
+        "total": 1,
+        "page": [
+            {
+                "key": {"author__name": "Readable", "author__id": "42"},
+                "aggregate": {"count": 2},
+            }
+        ],
+    }
+    assert owner_result.data["page"][0]["key"]["author__name"] == "Owner"
+    expected_spec = (("author__name", None), ("author__id", None))
+    assert calls == [
+        (label, field, BookModel, expected_spec, True)
+        for label in ("Readable", "Owner")
+        for field in ("books_groups_count", "books_groups")
+    ]
 
 
 def test_groups_max_groups_caps_the_offset_page(db):
