@@ -34,6 +34,7 @@ from typing import Any
 
 import strawberry
 from django.db.models import QuerySet
+from django.db.models.expressions import Combinable
 from strawberry_django.resolvers import django_resolver
 from strawberry_django_aggregates import (
     AggregateOp,
@@ -44,6 +45,11 @@ from strawberry_django_aggregates import (
 from .aggregation import _ops_from_aggregate_blocks, _selected_fields
 from .connection import capped_limit, validate_pagination
 from .filtering import _filter_lookups, filter_queryset, where_to_q
+
+GroupByExpressionProvider = Callable[
+    [strawberry.Info, QuerySet[Any], list[tuple[str, Any]]],
+    Mapping[str, Combinable],
+]
 
 
 def make_groups_field(
@@ -59,6 +65,7 @@ def make_groups_field(
     max_groups: int | None = None,
     group_key_encoders: Mapping[str, Callable[[Any], Any]] | None = None,
     filter_lookups: Mapping[str, tuple[str, bool]] | None = None,
+    get_group_by_expressions: GroupByExpressionProvider | None = None,
 ) -> tuple[Any, Any, list[type]]:
     """Return grouped row/count fields + the generated group types.
 
@@ -111,6 +118,15 @@ def make_groups_field(
             )
         return qs
 
+    def group_by_expressions(
+        info: strawberry.Info,
+        qs: QuerySet[Any],
+        spec: list[tuple[str, Any]],
+    ) -> Mapping[str, Combinable] | None:
+        if get_group_by_expressions is None:
+            return None
+        return get_group_by_expressions(info, qs, spec)
+
     def resolve_groups(
         self: Any,
         info: strawberry.Info,
@@ -127,6 +143,7 @@ def make_groups_field(
         # Owner-translated: wire inputs → compute_aggregation arguments. The
         # adapter never re-implements the spec / granularity / having parsing.
         spec = builder.translate_group_by(group_by)
+        expressions = group_by_expressions(info, qs, spec)
         requested = _requested_group_ops(info, builder.json_paths)
         having_dict = builder.translate_having(having, requested)
         order_terms = builder.translate_order_by(order_by, spec, requested)
@@ -134,6 +151,7 @@ def make_groups_field(
             qs,
             group_by=spec,
             aggregates=requested,
+            group_by_expressions=expressions,
             having=having_dict,
             order_by=order_terms,
             limit=capped_limit(limit, max_groups),
@@ -180,6 +198,7 @@ def make_groups_field(
         del self
         qs = filtered_queryset(info, where)
         spec = builder.translate_group_by(group_by)
+        expressions = group_by_expressions(info, qs, spec)
         requested = [(AggregateOp.COUNT, None)]
         having_dict = builder.translate_having(having, requested)
         return int(
@@ -188,6 +207,7 @@ def make_groups_field(
                 spec,
                 requested,
                 having_dict,
+                group_by_expressions=expressions,
             )
         )
 

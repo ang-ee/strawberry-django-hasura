@@ -160,6 +160,14 @@ limits, offsets, or configured maxima raise. Both limits default to `None`, so
 configure them for externally exposed resources and enforce document/input
 size, depth, alias, filter cardinality, and execution budgets in your app.
 
+For caller-owned computed or authorization-aware group axes, pass
+`get_group_by_expressions(info, queryset, spec)`. The adapter calls it after
+translating every selected `group_by` input and forwards its mapping to the
+aggregate owner for both grouped rows and exact group counts. Mapping keys may
+override only selected forward to-one scalar or date paths. Permissions and
+expression semantics remain the caller's responsibility. Resources without
+the hook are unchanged.
+
 `InMemoryRowSource` calls its source for each list/count resolution and does
 not retain rows on a context that may span multiple operations. A consumer
 may memoize within a source whose lifetime is explicitly one operation.
