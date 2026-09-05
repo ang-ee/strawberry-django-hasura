@@ -135,12 +135,29 @@ lookup in its own `_LOOKUPS`.
 - Maps to Django `.order_by()` (`desc` → a `-` prefix).
 - The public `id` ordering column maps to `id_column`, including custom primary
   keys. Unknown paths and to-many ordering paths fail at resource construction.
+- `hasura_resource(sortable=["sender_name"],
+  sortable_aliases={"sender_name": "_sender_name"}, …)` exposes an explicit
+  wire field mapped to an existing native queryset annotation. The mapping is
+  copied at construction. Every alias key must be in the
+  sortable allowlist. Wire names and annotation targets must be identifiers
+  without `__`, and may not collide with model fields, `pk`, or public `id`.
+  A selected alias whose target is absent from `queryset.query.annotations`
+  fails before execution; an unselected alias needs no annotation.
+- `get_queryset` owns annotation expressions, authorization, NULL behavior
+  and one-row-per-object cardinality. The adapter only translates names;
+  aliases do not add filters, aggregate fields, grouped dimensions or output
+  fields. Aggregate nodes retain their existing source-order behavior.
+- An explicit ORM `order_by` appends the model primary key ascending when it
+  is not already selected, including after annotation aliases. This makes
+  tied values stable across offset pages; an explicit PK direction is kept.
 
 ## Paging
 
 - bare `limit: Int` / `offset: Int` args → queryset slice. An unordered page
-  gets a deterministic `pk` tiebreaker; a caller-supplied `order_by` must be
-  *total* to page deterministically over it.
+  gets a deterministic `pk` tiebreaker. Explicit ORM wire ordering also gets
+  the PK tie breaker described above. When no wire order is passed, existing
+  source queryset ordering is preserved and must itself be total for stable
+  paging.
 - Negative limits and offsets raise consistently for ORM and row sources.
   Optional `max_rows` caps lists and aggregate nodes; optional `max_groups`
   caps group rows. Both default to `None`. Counts and aggregate math always
