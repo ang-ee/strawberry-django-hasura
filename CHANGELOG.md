@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0.dev0 (unreleased)
+
+- Expose resource-local json_paths, group_key_encoders and filter_lookups;
+  grouped and ungrouped execution share the native JSON allowlist and
+  declared measure alias translation.
+- Preserve independent resource configuration and portable row-source filters.
+
+
 All notable changes to `strawberry-django-hasura` are documented here. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to

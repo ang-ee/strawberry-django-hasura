@@ -287,3 +287,34 @@ type notes_group {
   `graphql-engine#10786`), so these field/argument names may change to track it.
   The stock list / aggregate / CRUD SDL above is unaffected (grouping is purely
   additive).
+
+
+## Resource-local aggregate and filtering configuration
+
+The hasura_resource builder accepts three optional mappings. They are copied
+at resource construction; building another resource or mutating the caller's
+dictionaries does not change an existing schema.
+
+- json_paths={"metadata.region": "str", "metadata.amount": "int"} declares
+  the aggregate owner's typed JSON allowlist. Include paths in groupable or
+  aggregatable to expose them. Emitted fields retain canonical aliases,
+  for example metadata__amount. List totals, grouped execution, having,
+  group ordering and exact group counts share the same allowlist. Selection
+  aliases are translated only for declared JSON paths; ordinary Django
+  relation paths retain their meaning. Ambiguous declarations fail at build.
+- group_key_encoders={"author": encode_author} maps declared unbucketed group
+  paths to non-null output identity codecs. A codec must preserve the generated
+  GraphQL scalar and identity; it does not change grouping SQL, measures,
+  order, filters, or counts. Null values bypass it. Date/number extraction
+  buckets cannot use an encoder. Supply matching field_id_decode separately
+  if clients filter by an encoded key.
+- filter_lookups={"iregex": ("__iregex", False)} maps comparison attribute
+  names to Django lookup suffixes and a boolean negation flag. The extension
+  reaches list, aggregate, grouped row/count and recursive boolean filters.
+  Portable operators cannot be overridden. Unsupported operators fail rather
+  than widening results. The computed RowSource vocabulary remains portable.
+
+The lower-level build_aggregate_type and make_aggregate_resolver accept
+json_paths; pass the same mapping to both. The where_to_q and comparison_to_q
+functions accept the corresponding backend extension as lookups. Existing
+resources without these declarations keep their SDL and behavior.

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import sys
 import types
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import strawberry
@@ -40,7 +41,7 @@ from strawberry_django_aggregates import (
 )
 
 from .aggregation import _ops_from_aggregate_blocks, _selected_fields
-from .filtering import where_to_q
+from .filtering import _filter_lookups, where_to_q
 
 
 def make_groups_field(
@@ -54,6 +55,8 @@ def make_groups_field(
     id_column: str = "pk",
     field_decoders: Any = None,
     max_groups: int | None = None,
+    group_key_encoders: Mapping[str, Callable[[Any], Any]] | None = None,
+    filter_lookups: Mapping[str, tuple[str, bool]] | None = None,
 ) -> tuple[Any, Any, list[type]]:
     """Return grouped row/count fields + the generated group types.
 
@@ -66,6 +69,8 @@ def make_groups_field(
     ``<res>_groups(group_by, where, having, order_by, limit, offset)`` root
     plus its exact, unpaginated ``<res>_groups_count`` companion.
     """
+    group_key_encoders = dict(group_key_encoders or {})
+    filter_lookups = _filter_lookups(filter_lookups)
     module = _host_module(resource_name)
     group_key_type = built.group_key_type
     aggregate_type = built.aggregate_type
@@ -98,6 +103,7 @@ def make_groups_field(
                     id_column=id_column,
                     id_decode=id_decode,
                     field_decoders=field_decoders,
+                    lookups=filter_lookups,
                 )
             )
         return qs
@@ -117,7 +123,7 @@ def make_groups_field(
         # Owner-translated: wire inputs → compute_aggregation arguments. The
         # adapter never re-implements the spec / granularity / having parsing.
         spec = builder.translate_group_by(group_by)
-        requested = _requested_group_ops(info)
+        requested = _requested_group_ops(info, builder.json_paths)
         having_dict = builder.translate_having(having, requested)
         order_terms = builder.translate_order_by(order_by, spec, requested)
         rows = compute_aggregation(
@@ -128,10 +134,16 @@ def make_groups_field(
             order_by=order_terms,
             limit=_capped(limit, max_groups),
             offset=offset or 0,
+            json_paths=builder.json_paths,
         )
         return [
             group_type(
-                key=builder.shape_group_key(group_key_type, row, spec),
+                key=builder.shape_group_key(
+                    group_key_type,
+                    row,
+                    spec,
+                    value_encoders=group_key_encoders,
+                ),
                 aggregate=shape_aggregate_row(
                     aggregate_type,
                     row,
@@ -204,6 +216,7 @@ def make_groups_field(
 
 def _requested_group_ops(
     info: strawberry.Info,
+    json_paths: Mapping[str, str] | None = None,
 ) -> list[tuple[Any, str | None]]:
     """The ``(op, field)`` pairs the client selected under ``aggregate``.
 
@@ -220,7 +233,7 @@ def _requested_group_ops(
         if field.name == "aggregate"
         for agg_field in _selected_fields(field.selections)
     ]
-    return _ops_from_aggregate_blocks(blocks)
+    return _ops_from_aggregate_blocks(blocks, json_paths)
 
 
 def _capped(limit: int | None, max_groups: int | None) -> int | None:

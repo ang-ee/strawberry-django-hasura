@@ -47,12 +47,12 @@ from strawberry import UNSET
 from strawberry.types import get_object_definition
 from strawberry_django.fields.types import field_type_map
 from strawberry_django.optimizer import optimize
-from strawberry_django_aggregates import AggregateBuilder
+from strawberry_django_aggregates import AggregateBuilder, group_by_alias
 
 from .aggregation import make_aggregate_resolver
 from .comparisons import IDComparison
 from .connection import make_aggregate_container, paginate
-from .filtering import where_to_q
+from .filtering import _filter_lookups, where_to_q
 from .grouping import make_groups_field
 from .inputs import (
     ID_WIRE_NAME as _ID_WIRE_NAME,
@@ -547,6 +547,9 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     sortable: list[str],
     aggregatable: list[str],
     groupable: list[str] | None = None,
+    json_paths: Mapping[str, str] | None = None,
+    group_key_encoders: Mapping[str, Callable[[Any], Any]] | None = None,
+    filter_lookups: Mapping[str, tuple[str, bool]] | None = None,
     max_groups: int | None = None,
     writable: list[str] | None = None,
     insertable: list[str] | None = None,
@@ -577,7 +580,13 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     ``<res>_groups`` row root and exact ``<res>_groups_count`` companion;
     ``max_groups`` caps only the row root's offset page (a high-cardinality
     dimension would otherwise pull every group — default ``None`` is uncapped;
-    pass ``order_by`` for stable pages). ``writable``
+    pass ``order_by`` for stable pages).
+    The json_paths mapping declares typed JSON paths for grouped and
+    ungrouped measures and dimensions. The group_key_encoders mapping
+    supplies output identity codecs for declared group paths, preserving
+    nulls and the generated scalar. The filter_lookups mapping extends
+    portable operators for this resource. All mappings are copied at
+    construction. ``writable``
     mirrors Hasura field
     permissions for insert / ``_set`` inputs (default: editable concrete model
     columns plus editable many-to-many relation arrays). ``insertable`` and
@@ -605,6 +614,24 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     ``hasura_config()``.
     """
     res = name or model.__name__.lower()
+    active_json_paths = dict(json_paths or {})
+    active_encoders = dict(group_key_encoders or {})
+    active_lookups = _filter_lookups(filter_lookups)
+    for path, encoder in active_encoders.items():
+        if path not in (groupable or []) or not callable(encoder):
+            raise ValueError(
+                f"Group-key encoder {path!r} must name a declared groupable "
+                "path and be callable"
+            )
+    aliases: dict[str, str] = {}
+    for path in {*aggregatable, *(groupable or []), *active_json_paths}:
+        alias = group_by_alias(path, None)
+        if alias in aliases and aliases[alias] != path:
+            raise ValueError(
+                f"Aggregate paths {aliases[alias]!r} and {path!r} "
+                f"share alias {alias!r}"
+            )
+        aliases[alias] = path
     public_id_fields = frozenset(field_id_decode or {})
     operations = _enabled_operations(
         insert=insert,
@@ -760,6 +787,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
                 id_column=id_column,
                 id_decode=id_decode,
                 field_decoders=field_id_decode,
+                lookups=active_lookups,
             )
         )
 
@@ -780,11 +808,14 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         name_prefix=aggregate_prefix,
         aggregate_fields=aggregatable,
         group_by_fields=groupable or None,
+        json_paths=active_json_paths,
     )
     agg_built = agg_builder.build()
     aggregate_type = cast("type", agg_built.aggregate_type)
     _pin_snake_wire_names(aggregate_type)
-    aggregate_resolver = make_aggregate_resolver(aggregate_type)
+    aggregate_resolver = make_aggregate_resolver(
+        aggregate_type, json_paths=active_json_paths
+    )
     container = make_aggregate_container(
         f"{res}_aggregate",
         node,
@@ -812,6 +843,8 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             id_column=id_column,
             field_decoders=field_id_decode,
             max_groups=max_groups,
+            group_key_encoders=active_encoders,
+            filter_lookups=active_lookups,
         )
         # Pin snake_case on the generated group types — the query walk reaches
         # the group container + key (a return type) but not the ``having`` /

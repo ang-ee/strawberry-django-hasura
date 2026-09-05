@@ -92,7 +92,7 @@ compose the result. Never work around it here.
    and one row in `filtering._LOOKUPS` mapping it to a Django lookup suffix.
    `comparison_to_q` reads it by `getattr`, so the addition is declarative. Keep
    `_LOOKUPS` portable — Postgres-only operators (`_iregex`, `_similar`) belong
-   in a project's own map, not the shared default.
+   in a resource's filter_lookups map, not the shared default.
 3. **New aggregate measure** → it is already free if the op exists on the native
    `<Model>Aggregate` (it does for `count`/`sum`/`avg`/`min`/`max`/`stddev`/…).
    If an op is missing, add it to `strawberry-django-aggregates`, not here.

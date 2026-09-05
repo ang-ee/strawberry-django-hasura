@@ -20,6 +20,7 @@ from __future__ import annotations
 import dataclasses
 import re
 from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import Any
 
 from django.db.models import Q
@@ -36,21 +37,23 @@ from strawberry import UNSET
 # backend that supports them — keep this map portable. A comparison that sets
 # an operator absent from this map raises in ``comparison_to_q`` (it is never
 # silently dropped — see there).
-_LOOKUPS: dict[str, tuple[str, bool]] = {
-    "eq": ("", False),
-    "neq": ("", True),
-    "gt": ("__gt", False),
-    "gte": ("__gte", False),
-    "lt": ("__lt", False),
-    "lte": ("__lte", False),
-    "in_": ("__in", False),
-    "nin": ("__in", True),
-    "like": ("__contains", False),
-    "nlike": ("__contains", True),
-    "ilike": ("__icontains", False),
-    "nilike": ("__icontains", True),
-    "contains": ("__contains", False),
-}
+_LOOKUPS: Mapping[str, tuple[str, bool]] = MappingProxyType(
+    {
+        "eq": ("", False),
+        "neq": ("", True),
+        "gt": ("__gt", False),
+        "gte": ("__gte", False),
+        "lt": ("__lt", False),
+        "lte": ("__lte", False),
+        "in_": ("__in", False),
+        "nin": ("__in", True),
+        "like": ("__contains", False),
+        "nlike": ("__contains", True),
+        "ilike": ("__icontains", False),
+        "nilike": ("__icontains", True),
+        "contains": ("__contains", False),
+    }
+)
 
 #: The portable operator vocabulary (the keys of ``_LOOKUPS``). The in-memory
 #: evaluator in ``run_query`` keeps its own ``(value, operand) -> bool``
@@ -162,11 +165,37 @@ def _like_pattern_to_regex(pattern: str) -> str:
     return "".join(parts)
 
 
+def _filter_lookups(
+    lookups: Mapping[str, tuple[str, bool]] | None,
+) -> Mapping[str, tuple[str, bool]]:
+    """Validate backend extensions without changing portable defaults."""
+    active = dict(_LOOKUPS)
+    for name, lookup in (lookups or {}).items():
+        if (
+            not isinstance(name, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]*", name) is None
+            or name == "is_null"
+            or not isinstance(lookup, tuple)
+            or len(lookup) != 2
+            or not isinstance(lookup[0], str)
+            or re.fullmatch(r"(?:__[a-z][a-z0-9_]*)?", lookup[0]) is None
+            or not isinstance(lookup[1], bool)
+        ):
+            raise ValueError(f"Invalid filter lookup {name!r}: {lookup!r}")
+        if name in _LOOKUPS and lookup != _LOOKUPS[name]:
+            raise ValueError(
+                f"Cannot override portable filter lookup {name!r}"
+            )
+        active[name] = lookup
+    return MappingProxyType(active)
+
+
 def comparison_to_q(
     field: str,
     cmp: Any,
     *,
     decode: Callable[[Any], Any] | None = None,
+    lookups: Mapping[str, tuple[str, bool]] | None = None,
 ) -> Q:
     """AND together every operator set on one field comparison.
 
@@ -178,10 +207,12 @@ def comparison_to_q(
     Postgres-only ``_iregex`` / ``_similar`` / ``_nsimilar`` on a backend that
     has not registered them) raises ``ValueError`` rather than being silently
     dropped: on a permission-naive read a silently-ignored filter would
-    *widen* the result set. A project enables one by adding it to ``_LOOKUPS``.
+    *widen* the result set. ``lookups`` supplies resource-local extensions;
+    portable operators cannot be overridden.
     """
+    active_lookups = _filter_lookups(lookups)
     q = Q()
-    for attr, (suffix, negate) in _LOOKUPS.items():
+    for attr, (suffix, negate) in active_lookups.items():
         val = getattr(cmp, attr, UNSET)
         if val is UNSET:
             continue
@@ -203,7 +234,7 @@ def comparison_to_q(
         clause = Q(**{f"{field}__isnull": True})
         q &= clause if is_null else ~clause
     for f in dataclasses.fields(cmp):
-        if f.name in _LOOKUPS or f.name == "is_null":
+        if f.name in active_lookups or f.name == "is_null":
             continue
         val = getattr(cmp, f.name, UNSET)
         if val is UNSET or val is None:
@@ -211,7 +242,7 @@ def comparison_to_q(
         raise ValueError(
             f"filter operator {f.name!r} on field {field!r} is accepted in "
             "the SDL but not mapped for this backend; register it in a "
-            "project-supplied filtering._LOOKUPS or omit it"
+            "project-supplied lookups mapping or omit it"
         )
     return q
 
@@ -222,6 +253,7 @@ def where_to_q(
     id_column: str = "pk",
     id_decode: Callable[[Any], Any] | None = None,
     field_decoders: Mapping[str, Callable[[Any], Any]] | None = None,
+    lookups: Mapping[str, tuple[str, bool]] | None = None,
 ) -> Q:
     """Walk a Hasura ``<resource>_bool_exp`` instance into a Django ``Q``.
 
@@ -246,6 +278,7 @@ def where_to_q(
                     id_column=id_column,
                     id_decode=id_decode,
                     field_decoders=field_decoders,
+                    lookups=lookups,
                 )
         elif f.name == _OR:
             any_q = Q()
@@ -255,6 +288,7 @@ def where_to_q(
                     id_column=id_column,
                     id_decode=id_decode,
                     field_decoders=field_decoders,
+                    lookups=lookups,
                 )
             q &= any_q
         elif f.name == _NOT:
@@ -263,10 +297,13 @@ def where_to_q(
                 id_column=id_column,
                 id_decode=id_decode,
                 field_decoders=field_decoders,
+                lookups=lookups,
             )
         elif f.name == "id":
-            q &= comparison_to_q(id_column, val, decode=id_decode)
+            q &= comparison_to_q(
+                id_column, val, decode=id_decode, lookups=lookups
+            )
         else:
             decoder = (field_decoders or {}).get(f.name)
-            q &= comparison_to_q(f.name, val, decode=decoder)
+            q &= comparison_to_q(f.name, val, decode=decoder, lookups=lookups)
     return q

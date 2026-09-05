@@ -81,3 +81,15 @@ __all__ = [
     "NoteModel",
     "TagModel",
 ]
+
+
+class AuthorProfileModel(models.Model):
+    """A nullable one-to-one axis uses the native unsuffixed group alias."""
+
+    author = models.OneToOneField(
+        AuthorModel, on_delete=models.CASCADE, null=True
+    )
+    label = models.CharField(max_length=100)
+
+    class Meta:
+        app_label = "tests"
