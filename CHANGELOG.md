@@ -5,6 +5,17 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] — 2026-09-05
+
+### Fixed
+
+- Lists, detail reads and aggregate nodes compose the active Strawberry Django
+  optimizer extension before queryset evaluation. Consumer optimizer behavior,
+  configured options and `DjangoOptimizerExtension.disabled()` now apply to
+  these roots under both sync and async execution. Without an active extension,
+  reads retain the native optimizer fallback. Public exports and SDL are
+  unchanged.
+
 ## [0.8.0] — 2026-09-05
 
 ### Fixed
@@ -330,6 +341,8 @@ for the target SDL and [`AGENTS.md`](./AGENTS.md) for the architecture.
   schema built with this library, and an in-memory SQLite test suite covering
   every surface plus the emitted-SDL contract.
 
+[0.8.1]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.8.1
+[0.8.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.8.0
 [0.7.1]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.7.1
 [0.7.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.7.0
 [0.6.0]: https://github.com/ang-ee/strawberry-django-hasura/releases/tag/v0.6.0

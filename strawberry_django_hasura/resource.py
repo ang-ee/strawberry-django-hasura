@@ -48,13 +48,17 @@ from strawberry_django.fields.types import (
     field_type_map,
     input_field_type_map,
 )
-from strawberry_django.optimizer import optimize
 from strawberry_django.resolvers import django_resolver
 from strawberry_django_aggregates import AggregateBuilder, group_by_alias
 
 from .aggregation import make_aggregate_resolver
 from .comparisons import IDComparison
-from .connection import capped_limit, make_aggregate_container, paginate
+from .connection import (
+    _optimize_queryset,
+    capped_limit,
+    make_aggregate_container,
+    paginate,
+)
 from .filtering import _filter_lookups, filter_queryset, where_to_q
 from .grouping import make_groups_field
 from .inputs import (
@@ -893,7 +897,9 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         qs = apply_ordering(
             filtered(info, where), order_by, id_column=id_column
         )
-        return optimize(paginate(qs, limit, offset, maximum=max_rows), info)
+        return _optimize_queryset(
+            paginate(qs, limit, offset, maximum=max_rows), info
+        )
 
     resolve_list.__annotations__ = {
         "self": Any,
@@ -923,7 +929,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         # All row roots compose the public optimizer before evaluation.
         # ``django_resolver`` keeps that evaluation safe under both GraphQL
         # executors; the callback remains the root's row-scope owner.
-        return optimize(qs, info).first()
+        return _optimize_queryset(qs, info).first()
 
     resolve_by_pk.__annotations__ = {
         "self": Any,
