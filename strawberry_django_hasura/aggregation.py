@@ -111,6 +111,8 @@ def _ops_from_aggregate_blocks(
             requested.append((op, None))
             continue
         for member in _selected_fields(block.selections):
+            if member.name.startswith("__"):
+                continue
             requested.append((op, aliases.get(member.name, member.name)))
     if (AggregateOp.COUNT, None) not in requested:
         requested.insert(0, (AggregateOp.COUNT, None))

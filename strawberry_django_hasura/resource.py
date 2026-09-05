@@ -44,15 +44,18 @@ import strawberry
 from django.core.exceptions import FieldDoesNotExist
 from django.db.models import Field, Model, QuerySet
 from strawberry import UNSET
-from strawberry.types import get_object_definition
-from strawberry_django.fields.types import field_type_map
+from strawberry_django.fields.types import (
+    field_type_map,
+    input_field_type_map,
+)
 from strawberry_django.optimizer import optimize
+from strawberry_django.resolvers import django_resolver
 from strawberry_django_aggregates import AggregateBuilder, group_by_alias
 
 from .aggregation import make_aggregate_resolver
 from .comparisons import IDComparison
-from .connection import make_aggregate_container, paginate
-from .filtering import _filter_lookups, where_to_q
+from .connection import capped_limit, make_aggregate_container, paginate
+from .filtering import _filter_lookups, filter_queryset, where_to_q
 from .grouping import make_groups_field
 from .inputs import (
     ID_WIRE_NAME as _ID_WIRE_NAME,
@@ -72,7 +75,7 @@ from .inputs import (
     pin_snake_wire_names as _pin_snake_wire_names,
 )
 from .mutations import input_to_dict
-from .ordering import apply_ordering
+from .ordering import apply_ordering, validate_sortable
 
 
 class FilterablePathError(ValueError):
@@ -220,21 +223,27 @@ class HasuraResource:
     groups_count_root: str | None = None
 
 
-def _column_python_type(field: Any) -> Any:
+def _column_python_type(field: Any, *, for_input: bool = False) -> Any:
     """The python type a Django column carries — asked of strawberry-django.
 
-    Defers to the owner (``field_type_map``) instead of re-listing scalars, so
-    the insert / ``_set`` input fields match the node type by construction. The
-    map is keyed by exact field class; walk the MRO so a subclass inherits its
-    base mapping (``EmailField`` → ``CharField`` → ``str``). A field type the
-    owner does not map raises rather than silently degrading to ``str`` (the
-    library's fail-fast stance — see ``filtering.comparison_to_q``).
+    Defers to the owner's scalar maps instead of re-listing them. Writable
+    inputs use ``input_field_type_map`` overrides (e.g. ``Upload`` for a file)
+    over ``field_type_map``. To-one relations carry their target key's scalar.
+    The maps are keyed by exact field class; walk the MRO so a subclass
+    inherits its base mapping (``EmailField`` → ``CharField`` → ``str``). A
+    field type the owner does not map raises rather than degrading to ``str``
+    (the library's fail-fast stance — see ``filtering.comparison_to_q``).
     """
-    if getattr(field, "many_to_one", False):
-        return _column_python_type(field.target_field)
+    if getattr(field, "many_to_one", False) or getattr(
+        field, "one_to_one", False
+    ):
+        return _column_python_type(field.target_field, for_input=for_input)
+    type_map = (
+        field_type_map | input_field_type_map if for_input else field_type_map
+    )
     for klass in type(field).__mro__:
-        if klass in field_type_map:
-            return field_type_map[klass]
+        if klass in type_map:
+            return type_map[klass]
     raise TypeError(
         f"field {field.name!r} ({type(field).__name__}) has no "
         "strawberry-django type mapping; it cannot be exposed as a Hasura "
@@ -393,16 +402,16 @@ def _not_writable_reason(field: Any, id_column: str) -> str | None:
     # through the forward-m2m allowance below.
     if not isinstance(field, Field):
         return "it is a reverse relation accessor, not a column"
-    if getattr(field, "many_to_many", False):
-        return None
-    if not getattr(field, "concrete", False):
-        return "it is not a concrete column"
     if getattr(field, "primary_key", False):
         return "it is the primary key"
     if field.name == id_column:
         return "it is the public id column"
     if not getattr(field, "editable", False):
         return "it is not editable"
+    if getattr(field, "many_to_many", False):
+        return None
+    if not getattr(field, "concrete", False):
+        return "it is not a concrete column"
     if getattr(field, "auto_now", False) or getattr(
         field, "auto_now_add", False
     ):
@@ -421,10 +430,14 @@ def _writable_python_type(
         item_type = (
             strawberry.ID
             if public_id
-            else _column_python_type(field.target_field)
+            else _column_python_type(field.target_field, for_input=True)
         )
         return types.GenericAlias(list, (item_type,))
-    return strawberry.ID if public_id else _column_python_type(field)
+    return (
+        strawberry.ID
+        if public_id
+        else _column_python_type(field, for_input=True)
+    )
 
 
 def _enabled_operations(
@@ -451,6 +464,7 @@ def _optional_on_insert(column: Any) -> bool:
 
     return (
         column.has_default()
+        or column.has_db_default()
         or getattr(column, "null", False)
         or getattr(column, "blank", False)
     )
@@ -468,7 +482,8 @@ def _insert_input_type(
     """Build a ``<name>_insert_input`` from a model's writable fields.
 
     Shared by the parent insert input and each nested child row input. A
-    concrete column with a Django default / null / blank is optional.
+    concrete column with a Python or database default, null, or blank is
+    optional.
     ``with_public_id`` prepends an optional public ``id`` (the upsert key) and
     makes every column optional, so the one child input serves both the nested
     insert (``id`` omitted) and a consumer's upsert diff (``id`` present).
@@ -546,11 +561,13 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     filterable: list[str],
     sortable: list[str],
     aggregatable: list[str],
+    aggregate_name: str | None = None,
     groupable: list[str] | None = None,
     json_paths: Mapping[str, str] | None = None,
     group_key_encoders: Mapping[str, Callable[[Any], Any]] | None = None,
     filter_lookups: Mapping[str, tuple[str, bool]] | None = None,
     max_groups: int | None = None,
+    max_rows: int | None = None,
     writable: list[str] | None = None,
     insertable: list[str] | None = None,
     updatable: list[str] | None = None,
@@ -581,6 +598,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     ``max_groups`` caps only the row root's offset page (a high-cardinality
     dimension would otherwise pull every group — default ``None`` is uncapped;
     pass ``order_by`` for stable pages).
+    ``max_rows`` caps list and aggregate-node pages while keeping aggregate
+    math unpaged. ``aggregate_name`` overrides the resource-stem prefix used
+    for native aggregate and grouping types; choose a unique prefix in the
+    consuming schema.
     The json_paths mapping declares typed JSON paths for grouped and
     ungrouped measures and dimensions. The group_key_encoders mapping
     supplies output identity codecs for declared group paths, preserving
@@ -610,10 +631,12 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     Returns a :class:`HasuraResource` whose ``query`` / ``mutation`` /
     ``types`` drop into a schema bucket. Every generated wire name (roots,
     args, input fields, and the ``<Model>Aggregate`` field names) is pinned
-    snake_case, so the resource is correct on a camelCase schema without
-    ``hasura_config()``.
+    snake_case. Output node fields remain caller-owned: explicitly name them
+    or use ``hasura_config()`` when snake_case is required on those fields.
     """
     res = name or model.__name__.lower()
+    capped_limit(None, max_rows)
+    capped_limit(None, max_groups)
     active_json_paths = dict(json_paths or {})
     active_encoders = dict(group_key_encoders or {})
     active_lookups = _filter_lookups(filter_lookups)
@@ -638,12 +661,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         update=update,
         delete=delete,
     )
-    # The ``<Model>Aggregate`` prefix is the node's GraphQL name (``Note``,
-    # owned by the node type), not the Django class name (``NoteModel``).
-    node_definition = get_object_definition(node)
-    aggregate_prefix = (
-        node_definition.name if node_definition is not None else model.__name__
-    )
+    # Resource-scoped names isolate independently configured aggregate types
+    # even when two resources share a node. A legacy prefix is an explicit
+    # caller choice and must be unique within its consuming schema.
+    aggregate_prefix = aggregate_name or res
     module = _host_module(res)
     # --- where / order_by inputs (derived from the Django fields) ------------
     # ``id`` is the fixed refine ``idType`` wire name (not the Django column,
@@ -665,6 +686,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         },
         module,
     )
+    validate_sortable(model, sortable, id_column=id_column)
     order_by_input = build_order_by(res, sortable, module)
 
     insert_fields = _writable_fields(
@@ -781,14 +803,15 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     ) -> QuerySet[Any]:
         # ``source(info)`` is the caller's already row-scoped source; the
         # resource applies the Hasura ``where`` on top.
-        return source(info).filter(
+        return filter_queryset(
+            source(info),
             where_to_q(
                 where,
                 id_column=id_column,
                 id_decode=id_decode,
                 field_decoders=field_id_decode,
                 lookups=active_lookups,
-            )
+            ),
         )
 
     def filtered(info: strawberry.Info, where: Any) -> QuerySet[Any]:
@@ -812,7 +835,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     )
     agg_built = agg_builder.build()
     aggregate_type = cast("type", agg_built.aggregate_type)
-    _pin_snake_wire_names(aggregate_type)
+    _pin_snake_wire_names(aggregate_type, recursive=True)
     aggregate_resolver = make_aggregate_resolver(
         aggregate_type, json_paths=active_json_paths
     )
@@ -823,6 +846,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         filtered_queryset=filtered_aggregate,
         filtered_nodes_queryset=filtered,
         aggregate_resolver=aggregate_resolver,
+        max_rows=max_rows,
     )
     groups_field: Any = None
     groups_count_field: Any = None
@@ -850,7 +874,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         # the group container + key (a return type) but not the ``having`` /
         # ``order_by`` INPUT types (e.g. ``count_gt`` would camelCase).
         for grouped in groups_types:
-            _pin_snake_wire_names(grouped)
+            _pin_snake_wire_names(grouped, recursive=True)
         group_type = groups_types[0]
         group_key_type = cast("type", agg_built.group_key_type)
         group_by_spec_type = groups_types[2]
@@ -866,8 +890,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         limit: int | None = None,
         offset: int | None = None,
     ) -> Any:
-        qs = apply_ordering(filtered(info, where), order_by)
-        return paginate(qs, limit, offset)
+        qs = apply_ordering(
+            filtered(info, where), order_by, id_column=id_column
+        )
+        return optimize(paginate(qs, limit, offset, maximum=max_rows), info)
 
     resolve_list.__annotations__ = {
         "self": Any,
@@ -894,13 +920,9 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     def resolve_by_pk(self: Any, info: strawberry.Info, id: str) -> Any | None:
         lookup = id_decode(id) if id_decode is not None else id
         qs = get_queryset(info).filter(**{id_column: lookup})
-        # Lean on strawberry-django's optimizer for the single row's nested
-        # selections too. ``.first()`` evaluates eagerly, so — unlike the list
-        # / ``nodes`` resolvers, whose lazy queryset the optimizer extension
-        # auto-optimizes — by_pk must compose ``optimize()`` itself or its
-        # relations N+1. ``optimize`` is a standalone primitive (it applies the
-        # same select_related / prefetch / ``.only()`` hints with or without
-        # the extension installed): it composes the wheel, never reinvents it.
+        # All row roots compose the public optimizer before evaluation.
+        # ``django_resolver`` keeps that evaluation safe under both GraphQL
+        # executors; the callback remains the root's row-scope owner.
         return optimize(qs, info).first()
 
     resolve_by_pk.__annotations__ = {
@@ -919,12 +941,15 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     )
 
     query_fields = {
-        list_root: strawberry.field(resolver=resolve_list, name=list_root),
+        list_root: strawberry.field(
+            resolver=django_resolver(resolve_list),
+            name=list_root,
+        ),
         aggregate_root: strawberry.field(
             resolver=resolve_aggregate, name=aggregate_root
         ),
         detail_root: strawberry.field(
-            resolver=resolve_by_pk, name=detail_root
+            resolver=django_resolver(resolve_by_pk), name=detail_root
         ),
     }
     if groups_field is not None and groups_root is not None:
@@ -967,7 +992,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             "return": node,
         }
         mutation_fields[insert_one_root] = strawberry.mutation(
-            resolver=resolve_insert,
+            resolver=django_resolver(resolve_insert),
             name=insert_one_root,
         )
     if "update" in operations:
@@ -992,7 +1017,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             "return": node,
         }
         mutation_fields[update_by_pk_root] = strawberry.mutation(
-            resolver=resolve_update,
+            resolver=django_resolver(resolve_update),
             name=update_by_pk_root,
         )
     if "delete" in operations:
@@ -1010,7 +1035,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             "return": node | None,
         }
         mutation_fields[delete_by_pk_root] = strawberry.mutation(
-            resolver=resolve_delete,
+            resolver=django_resolver(resolve_delete),
             name=delete_by_pk_root,
         )
 

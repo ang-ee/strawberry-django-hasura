@@ -23,7 +23,8 @@ from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import Any
 
-from django.db.models import Q
+from django.core.exceptions import FieldDoesNotExist
+from django.db.models import Model, Q, QuerySet
 from strawberry import UNSET
 
 # Hasura comparison attr (the python name behind the ``_eq`` wire field) ->
@@ -210,6 +211,10 @@ def comparison_to_q(
     *widen* the result set. ``lookups`` supplies resource-local extensions;
     portable operators cannot be overridden.
     """
+    for field_def in dataclasses.fields(cmp):
+        validate_comparison_operand(
+            field_def.name, getattr(cmp, field_def.name, UNSET)
+        )
     active_lookups = _filter_lookups(lookups)
     q = Q()
     for attr, (suffix, negate) in active_lookups.items():
@@ -245,6 +250,45 @@ def comparison_to_q(
             "project-supplied lookups mapping or omit it"
         )
     return q
+
+
+def validate_comparison_operand(attr: str, value: Any) -> None:
+    """An explicit null is not an omitted filter constraint."""
+    if value is None:
+        raise ValueError(
+            f"Filter operator {attr!r} does not accept null; "
+            "use _is_null with true or false"
+        )
+
+
+def filter_queryset(queryset: QuerySet[Any], predicate: Q) -> QuerySet[Any]:
+    """Apply membership predicates without multiplying parent identities.
+
+    A direct to-many comparison can match several related rows. Compose a
+    primary-key subquery in that case; the outer queryset retains its scope,
+    annotations and optimizer hints while SQL membership returns each parent
+    once. Scalar/to-one predicates keep the ordinary filter path.
+    """
+    matched = queryset.filter(predicate)
+    if not _has_to_many_lookup(queryset.model, predicate):
+        return matched
+    return queryset.filter(pk__in=matched.order_by().values("pk"))
+
+
+def _has_to_many_lookup(model: type[Model], predicate: Q) -> bool:
+    for child in predicate.children:
+        if isinstance(child, Q):
+            if _has_to_many_lookup(model, child):
+                return True
+        elif isinstance(child, tuple) and isinstance(child[0], str):
+            name = child[0].split("__", 1)[0]
+            try:
+                field = model._meta.get_field(name)
+            except FieldDoesNotExist:
+                continue
+            if field.many_to_many or field.one_to_many:
+                return True
+    return False
 
 
 def where_to_q(

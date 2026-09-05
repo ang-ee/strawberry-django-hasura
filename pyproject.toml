@@ -1,6 +1,6 @@
 [project]
 name            = "strawberry-django-hasura"
-version         = "0.8.0.dev0"
+version         = "0.8.0"
 description     = "Expose Django models over GraphQL in the Hasura convention — the stock @refinedev/hasura refine data provider drives Strawberry/Django, composing strawberry-django + strawberry-django-aggregates (aggregates for free)."
 readme          = "README.md"
 requires-python = ">=3.14"
@@ -29,7 +29,7 @@ dependencies = [
   "django>=6.0",
   "strawberry-graphql>=0.315.0",
   "strawberry-graphql-django>=0.82.0",
-  "strawberry-django-aggregates>=0.11.0.dev0",
+  "strawberry-django-aggregates>=0.11.0",
 ]
 
 [project.urls]
@@ -44,6 +44,7 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.10",
   "django-stubs>=5",
+  "psycopg[binary]>=3.3",
 ]
 
 [build-system]
@@ -94,7 +95,3 @@ django_settings_module = "tests.settings"
 # cannot analyze it. Treat its imports as untyped until it ships one.
 module                 = "strawberry_django_aggregates.*"
 ignore_missing_imports = true
-
-# Reviewed upstream feature commit; replace with the published minimum at release.
-[tool.uv.sources]
-strawberry-django-aggregates = { git = "https://github.com/ang-ee/strawberry-django-aggregates.git", rev = "587fc099ae1db69c618f9d0d38d6dc1deec63142" }

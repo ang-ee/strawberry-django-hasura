@@ -135,6 +135,40 @@ class DateTimeComparison:
     is_null: bool | None = strawberry.field(name="_is_null", default=UNSET)
 
 
+@strawberry.input(name="Date_comparison_exp")
+class DateComparison:
+    eq: datetime.date | None = strawberry.field(name="_eq", default=UNSET)
+    neq: datetime.date | None = strawberry.field(name="_neq", default=UNSET)
+    gt: datetime.date | None = strawberry.field(name="_gt", default=UNSET)
+    gte: datetime.date | None = strawberry.field(name="_gte", default=UNSET)
+    lt: datetime.date | None = strawberry.field(name="_lt", default=UNSET)
+    lte: datetime.date | None = strawberry.field(name="_lte", default=UNSET)
+    in_: list[datetime.date] | None = strawberry.field(
+        name="_in", default=UNSET
+    )
+    nin: list[datetime.date] | None = strawberry.field(
+        name="_nin", default=UNSET
+    )
+    is_null: bool | None = strawberry.field(name="_is_null", default=UNSET)
+
+
+@strawberry.input(name="Time_comparison_exp")
+class TimeComparison:
+    eq: datetime.time | None = strawberry.field(name="_eq", default=UNSET)
+    neq: datetime.time | None = strawberry.field(name="_neq", default=UNSET)
+    gt: datetime.time | None = strawberry.field(name="_gt", default=UNSET)
+    gte: datetime.time | None = strawberry.field(name="_gte", default=UNSET)
+    lt: datetime.time | None = strawberry.field(name="_lt", default=UNSET)
+    lte: datetime.time | None = strawberry.field(name="_lte", default=UNSET)
+    in_: list[datetime.time] | None = strawberry.field(
+        name="_in", default=UNSET
+    )
+    nin: list[datetime.time] | None = strawberry.field(
+        name="_nin", default=UNSET
+    )
+    is_null: bool | None = strawberry.field(name="_is_null", default=UNSET)
+
+
 @strawberry.input(name="JSON_comparison_exp")
 class JSONComparison:
     eq: JSON | None = strawberry.field(name="_eq", default=UNSET)

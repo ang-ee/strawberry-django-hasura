@@ -93,3 +93,45 @@ class AuthorProfileModel(models.Model):
 
     class Meta:
         app_label = "tests"
+
+
+class ReadBoundaryModel(models.Model):
+    """A custom PK and to-many filter exercise the read composition seam."""
+
+    code = models.CharField(max_length=20, primary_key=True)
+    score = models.IntegerField(default=0)
+    status = models.CharField(max_length=20, default="public")
+    optional_title = models.CharField(max_length=100, null=True)
+    tags = models.ManyToManyField(TagModel, blank=True)
+
+    class Meta:
+        app_label = "tests"
+
+
+class WriteBoundaryTargetModel(models.Model):
+    """A natural-key target for writable one-to-one scalar coverage."""
+
+    code = models.CharField(max_length=40, primary_key=True)
+
+    class Meta:
+        app_label = "tests"
+
+
+class WriteBoundaryModel(models.Model):
+    """Model-owned write exclusions and input scalar/default metadata."""
+
+    title = models.CharField(max_length=40)
+    protected_tags = models.ManyToManyField(
+        TagModel, editable=False, related_name="protected_write_boundaries"
+    )
+    allowed_tags = models.ManyToManyField(
+        TagModel, blank=True, related_name="allowed_write_boundaries"
+    )
+    owner = models.OneToOneField(
+        WriteBoundaryTargetModel, on_delete=models.CASCADE, null=True
+    )
+    document = models.FileField(blank=True)
+    revision = models.IntegerField(db_default=7)
+
+    class Meta:
+        app_label = "tests"

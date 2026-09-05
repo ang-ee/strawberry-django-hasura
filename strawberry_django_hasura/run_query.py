@@ -27,7 +27,9 @@ permission-naive, the same stance as ``resource.py``.
 from __future__ import annotations
 
 import dataclasses
+import uuid
 from collections.abc import Callable, Iterable, Sequence
+from enum import Enum
 from typing import Any, Protocol
 
 import strawberry
@@ -35,8 +37,13 @@ from strawberry import UNSET
 from strawberry.types import get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
 
-from .comparisons import IDComparison
-from .filtering import PORTABLE_LOOKUPS, hasura_like_matches
+from .comparisons import IDComparison, JSONComparison
+from .connection import capped_limit, validate_pagination
+from .filtering import (
+    PORTABLE_LOOKUPS,
+    hasura_like_matches,
+    validate_comparison_operand,
+)
 from .inputs import (
     ID_WIRE_NAME,
     build_bool_exp,
@@ -51,20 +58,13 @@ from .resource import HasuraResource
 # --- the in-memory dialect evaluator (Python sibling of where_to_q) ----------
 
 
-def _as_text(value: Any) -> str:
-    return "" if value is None else str(value)
-
-
 def _ordered(
     op: Callable[[Any, Any], bool],
 ) -> Callable[[Any, Any], bool]:
     """Wrap an ordering predicate so it never raises mid-filter.
 
-    A NULL row value or an *uncomparable* value/operand pair — a ``date`` row
-    against a ``datetime`` operand (``DateTimeComparison`` maps both), a naive
-    datetime against a tz-aware one — excludes the row rather than crashing the
-    whole query. This is the in-memory analogue of SQL's three-valued logic,
-    where such a comparison is UNKNOWN and yields no match.
+    A NULL row value or an incomparable value/operand pair, such as a naive
+    datetime against a timezone-aware one, excludes the row.
     """
 
     def predicate(value: Any, operand: Any) -> bool:
@@ -136,16 +136,44 @@ if set(_LOOKUP_OPS) != PORTABLE_LOOKUPS:
     )
 
 
-def _json_contains(value: Any, operand: Any) -> bool:
-    """Best-effort Hasura JSON ``_contains`` over an in-memory value."""
+def _json_equal(value: Any, operand: Any) -> bool:
+    """JSON structural equality, keeping booleans distinct from numbers."""
     if isinstance(value, dict) and isinstance(operand, dict):
-        return all(value.get(key) == val for key, val in operand.items())
-    if isinstance(value, (list, tuple, set)):
-        return operand in value
-    return operand in _as_text(value)
+        return value.keys() == operand.keys() and all(
+            _json_equal(value[key], item) for key, item in operand.items()
+        )
+    if isinstance(value, list) and isinstance(operand, list):
+        return len(value) == len(operand) and all(
+            _json_equal(left, right)
+            for left, right in zip(value, operand, strict=True)
+        )
+    if type(value) in (int, float) and type(operand) in (int, float):
+        return bool(value == operand)
+    return type(value) is type(operand) and bool(value == operand)
 
 
-def _comparison_matches(value: Any, comparison: Any) -> bool:
+def _json_contains(value: Any, operand: Any, *, nested: bool = False) -> bool:
+    """JSONB containment: object subsets and unordered array subsets.
+
+    Structure is preserved; scalar strings compare exactly. PostgreSQL's
+    top-level array/primitive exception does not flatten nested containers.
+    """
+    if isinstance(operand, dict):
+        return isinstance(value, dict) and all(
+            key in value and _json_contains(value[key], item, nested=True)
+            for key, item in operand.items()
+        )
+    if isinstance(operand, list):
+        return isinstance(value, list) and all(
+            any(_json_contains(item, wanted, nested=True) for item in value)
+            for wanted in operand
+        )
+    if isinstance(value, list) and not nested:
+        return any(_json_equal(item, operand) for item in value)
+    return _json_equal(value, operand)
+
+
+def _comparison_matches(value: Any, comparison: Any) -> bool | None:
     """AND together every operator set on one field comparison.
 
     The public ``id`` surface is GraphQL ``String`` (operands deserialize
@@ -161,23 +189,23 @@ def _comparison_matches(value: Any, comparison: Any) -> bool:
         if value is not None and isinstance(comparison, IDComparison)
         else value
     )
+    constrained = False
     for attr, predicate in _LOOKUP_OPS.items():
         operand = getattr(comparison, attr, UNSET)
-        # An explicit ``null`` operand (e.g. ``_gt: null``) carries no
-        # constraint — treat it like ``UNSET`` rather than crashing ``>`` /
-        # ``in`` / ``.lower()`` on ``None``. ``_is_null`` tests for NULL.
-        if operand is UNSET or operand is None:
+        if operand is UNSET:
             continue
-        if not predicate(compare_value, operand):
+        constrained = True
+        if isinstance(comparison, JSONComparison) and attr in {"eq", "neq"}:
+            equal = _json_equal(compare_value, operand)
+            matched = equal if attr == "eq" else not equal
+        else:
+            matched = predicate(compare_value, operand)
+        if not matched:
             return False
     is_null = getattr(comparison, "is_null", UNSET)
-    if (
-        is_null is not UNSET
-        and is_null is not None
-        and (value is None) != bool(is_null)
-    ):
+    if is_null is not UNSET and (value is None) != bool(is_null):
         return False
-    return True
+    return True if constrained or is_null is not UNSET else None
 
 
 def _validate_comparison(comparison: Any) -> None:
@@ -189,9 +217,11 @@ def _validate_comparison(comparison: Any) -> None:
     would *widen* the result set.
     """
     for field in dataclasses.fields(comparison):
+        operand = getattr(comparison, field.name, UNSET)
+        validate_comparison_operand(field.name, operand)
         if field.name in _LOOKUP_OPS or field.name == "is_null":
             continue
-        if getattr(comparison, field.name, UNSET) not in (UNSET, None):
+        if operand is not UNSET:
             raise ValueError(
                 f"filter operator {field.name!r} is accepted in the SDL but "
                 "not supported by the in-memory row source"
@@ -220,16 +250,6 @@ def _validate_where(where: Any) -> None:
             _validate_comparison(value)
 
 
-def _is_empty_where(where: Any) -> bool:
-    """Whether a ``<res>_bool_exp`` sets no constraint (an empty ``Q``)."""
-    if where is None or where is UNSET:
-        return True
-    return all(
-        getattr(where, field.name, UNSET) in (UNSET, None)
-        for field in dataclasses.fields(where)
-    )
-
-
 def where_matches(where: Any, row: Any) -> bool:
     """Evaluate a Hasura ``<res>_bool_exp`` instance against one row.
 
@@ -238,32 +258,47 @@ def where_matches(where: Any, row: Any) -> bool:
     boolean. A field's python attr name equals its row attribute (both
     snake_case), so the value is read with ``getattr``.
     """
+    _validate_where(where)
+    return _where_result(where, row) is not False
+
+
+def _where_result(where: Any, row: Any) -> bool | None:
+    """Evaluate a validated predicate; None preserves Django's empty Q."""
     if where is None or where is UNSET:
-        return True
+        return None
+    constrained = False
     for field in dataclasses.fields(where):
         value = getattr(where, field.name, UNSET)
         if value is UNSET or value is None:
             continue
-        if field.name == "and_":
-            if not all(where_matches(sub, row) for sub in value):
-                return False
-        elif field.name == "or_":
-            # An empty ``_or`` is a no-op (``where_to_q`` ANDs an empty ``Q``,
-            # matching every row), not an exclude-all.
-            if value and not any(where_matches(sub, row) for sub in value):
-                return False
+        result: bool | None
+        if field.name in {"and_", "or_"}:
+            children = [
+                child
+                for sub in value
+                if (child := _where_result(sub, row)) is not None
+            ]
+            combine = all if field.name == "and_" else any
+            result = combine(children) if children else None
         elif field.name == "not_":
-            # ``~Q()`` matches every row, so an empty ``_not`` is a no-op, not
-            # an exclude-all.
-            if not _is_empty_where(value) and where_matches(value, row):
-                return False
-        elif not _comparison_matches(_row_value(row, field.name), value):
+            child = _where_result(value, row)
+            result = not child if child is not None else None
+        else:
+            result = _comparison_matches(_row_value(row, field.name), value)
+        if result is False:
             return False
-    return True
+        constrained |= result is not None
+    return True if constrained else None
 
 
 def _row_value(row: Any, name: str) -> Any:
-    return getattr(row, name, None)
+    value = getattr(row, name, None)
+    # Enum comparisons use the declared string-value contract, consistently
+    # for ordinary Enum, IntEnum, and string enum rows and for ordering.
+    if isinstance(value, Enum):
+        return str(value.value)
+    # Non-pk UUID fields also use String_comparison_exp.
+    return str(value) if isinstance(value, uuid.UUID) else value
 
 
 def _sort_key(value: Any) -> tuple[bool, Any]:
@@ -316,8 +351,9 @@ def apply_in_memory(
     id_field: str | None = None,
 ) -> list[Any]:
     """Filter, order, and page a row iterable per the Hasura request."""
+    validate_pagination(limit, offset)
     _validate_where(where)
-    matched = [row for row in rows if where_matches(where, row)]
+    matched = [row for row in rows if _where_result(where, row) is not False]
     ordered = order_rows(matched, order_by, id_field=id_field)
     start = offset or 0
     return ordered[start:] if limit is None else ordered[start : start + limit]
@@ -349,32 +385,6 @@ class RowSource(Protocol):
     def count(self, info: strawberry.Info, *, where: Any) -> int: ...
 
 
-def _request_cache(context: Any) -> dict[Any, Any] | None:
-    """A per-request dict to memoise materialised rows, when context allows.
-
-    Strawberry's ``info.context`` is the natural per-request store. A mapping
-    context is used directly; an object gets a cache attribute; ``None`` (a
-    context-less ``execute``) disables memoisation.
-    """
-    if context is None:
-        return None
-    if isinstance(context, dict):
-        store = context.get("__sdh_row_cache__")
-        if not isinstance(store, dict):
-            store = {}
-            context["__sdh_row_cache__"] = store
-        return store
-    existing = getattr(context, "__sdh_row_cache__", None)
-    if isinstance(existing, dict):
-        return existing
-    fresh: dict[Any, Any] = {}
-    try:
-        context.__sdh_row_cache__ = fresh
-    except AttributeError, TypeError:
-        return None
-    return fresh
-
-
 class InMemoryRowSource:
     """A :class:`RowSource` over rows materialised in Python per request.
 
@@ -382,6 +392,10 @@ class InMemoryRowSource:
     introspection); the source then filters / orders / pages / counts it with
     the in-memory dialect evaluator. Right for already-materialised, bounded
     data — there is no transport to push the predicate down to.
+
+    Each query/count call obtains freshly scoped rows. Context objects can
+    outlive a GraphQL operation, so this source never caches rows on context.
+    A consumer may memoise inside an explicitly operation-scoped get_rows.
     """
 
     def __init__(
@@ -396,16 +410,7 @@ class InMemoryRowSource:
         self._id_field = id_field
 
     def _rows(self, info: strawberry.Info) -> list[Any]:
-        # Materialise once per request so the list + count roots of a single
-        # query share one scan instead of re-running ``get_rows`` each.
-        cache = _request_cache(getattr(info, "context", None))
-        if cache is None:
-            return list(self._get_rows(info))
-        rows: list[Any] | None = cache.get(id(self))
-        if rows is None:
-            rows = list(self._get_rows(info))
-            cache[id(self)] = rows
-        return rows
+        return list(self._get_rows(info))
 
     def query(
         self,
@@ -416,6 +421,7 @@ class InMemoryRowSource:
         limit: int | None,
         offset: int | None,
     ) -> list[Any]:
+        validate_pagination(limit, offset)
         return apply_in_memory(
             self._rows(info),
             where,
@@ -427,7 +433,11 @@ class InMemoryRowSource:
 
     def count(self, info: strawberry.Info, *, where: Any) -> int:
         _validate_where(where)
-        return sum(1 for row in self._rows(info) if where_matches(where, row))
+        return sum(
+            1
+            for row in self._rows(info)
+            if _where_result(where, row) is not False
+        )
 
 
 # --- the builder -------------------------------------------------------------
@@ -474,23 +484,25 @@ def _python_type_of(field_type: Any) -> Any:
     return field_type
 
 
-def _count_aggregate_type(node: type) -> type:
-    """Build the minimal ``<Node>Aggregate { count: Int! }`` for the row path.
+def _count_aggregate_type(name: str) -> type:
+    """Build the minimal ``<Resource>Aggregate { count: Int! }`` row payload.
 
     Unlike the model path's free ``<Model>Aggregate`` (the SQL aggregate
     compiler), a computed resource only needs the row total for pagination, so
     its aggregate is count-only.
     """
-    definition = get_object_definition(node)
-    node_name = definition.name if definition is not None else node.__name__
     aggregate = type(
-        f"{node_name}__aggregate", (), {"__annotations__": {"count": int}}
+        f"{name}__aggregate", (), {"__annotations__": {"count": int}}
     )
-    return strawberry.type(aggregate, name=f"{node_name}Aggregate")
+    return strawberry.type(aggregate, name=f"{name}Aggregate")
 
 
 def _aggregate_container(
-    res: str, node: type, source: RowSource, count_type: type
+    res: str,
+    node: type,
+    source: RowSource,
+    count_type: type,
+    max_rows: int | None,
 ) -> type:
     """Build the ``<res>_aggregate { aggregate, nodes }`` container.
 
@@ -511,7 +523,7 @@ def _aggregate_container(
 
     def resolve_nodes(self: Any, info: strawberry.Info) -> Any:
         return source.query(
-            info, where=self.where, order_by=None, limit=None, offset=None
+            info, where=self.where, order_by=None, limit=max_rows, offset=None
         )
 
     resolve_nodes.__annotations__ = {
@@ -537,6 +549,8 @@ def hasura_run_query_resource(
     sortable: Sequence[str],
     source: RowSource,
     id_field: str = ID_WIRE_NAME,
+    max_rows: int | None = None,
+    aggregate_name: str | None = None,
 ) -> HasuraResource:
     """Assemble a read-only Hasura resource over a :class:`RowSource`.
 
@@ -546,12 +560,17 @@ def hasura_run_query_resource(
     ``<res>_bool_exp`` / ``<res>_order_by`` column allowlists. ``source``
     reads, filters, orders, pages and counts the rows (the pushdown seam).
     ``id_field`` is the node field ``<res>_by_pk`` matches (its comparison is
-    the String-typed ``ID`` surface).
+    the String-typed ``ID`` surface). ``max_rows`` optionally caps list and
+    aggregate nodes responses, including requests that omit ``limit``;
+    aggregate counts remain exact and unpaginated. ``aggregate_name``
+    overrides the resource-based aggregate type prefix; use it to retain
+    a previously published node-based type name.
 
-    Returns a :class:`HasuraResource` with ``mutation=None`` (read-only) whose
-    ``query`` / ``types`` drop into a schema bucket alongside model resources.
+    Returns a :class:`HasuraResource` with an empty mutation holder (read-only)
+    whose ``query`` / ``types`` drop into a schema alongside model resources.
     """
     res = name
+    capped_limit(None, max_rows)
     module = host_module(res)
     field_types = _node_field_python_types(node)
     missing = [
@@ -582,8 +601,8 @@ def hasura_run_query_resource(
         module,
     )
     order_by_input = build_order_by(res, list(sortable), module)
-    count_type = _count_aggregate_type(node)
-    container = _aggregate_container(res, node, source, count_type)
+    count_type = _count_aggregate_type(aggregate_name or res)
+    container = _aggregate_container(res, node, source, count_type, max_rows)
 
     def resolve_list(
         self: Any,
@@ -593,8 +612,13 @@ def hasura_run_query_resource(
         limit: int | None = None,
         offset: int | None = None,
     ) -> list[Any]:
+        validate_pagination(limit, offset)
         return source.query(
-            info, where=where, order_by=order_by, limit=limit, offset=offset
+            info,
+            where=where,
+            order_by=order_by,
+            limit=capped_limit(limit, max_rows),
+            offset=offset,
         )
 
     resolve_list.__annotations__ = {

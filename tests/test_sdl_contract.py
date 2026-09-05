@@ -6,6 +6,7 @@ it the provider references. Converted from the spike's rendered Hasura SDL.
 
 from __future__ import annotations
 
+import datetime
 import re
 from typing import Any
 
@@ -14,8 +15,41 @@ import strawberry
 import strawberry_django
 from strawberry import auto
 
-from strawberry_django_hasura import FilterablePathError, hasura_resource
+from strawberry_django_hasura import (
+    FilterablePathError,
+    InMemoryRowSource,
+    hasura_resource,
+    hasura_run_query_resource,
+)
 from tests.models import AuthorModel, BookModel, ChapterModel
+
+
+def test_temporal_comparisons_and_resource_aggregate_prefix():
+    @strawberry.type
+    class TemporalRow:
+        id: str
+        date: datetime.date
+        time: datetime.time
+
+    resource = hasura_run_query_resource(
+        TemporalRow,
+        name="temporal_rows",
+        filterable=["id", "date", "time"],
+        sortable=["id"],
+        source=InMemoryRowSource(lambda info: []),
+    )
+    sdl = str(strawberry.Schema(query=resource.query, types=resource.types))
+    for marker in (
+        "date: Date_comparison_exp",
+        "time: Time_comparison_exp",
+        "input Date_comparison_exp {",
+        "input Time_comparison_exp {",
+        "_eq: Date",
+        "_eq: Time",
+        "aggregate: temporal_rowsAggregate!",
+    ):
+        assert marker in sdl
+
 
 # CRUD surface markers — list (where/order_by/limit/offset), by-pk, mutations,
 # the snake_case wire convention, and the String-typed pk surface

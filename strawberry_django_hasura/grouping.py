@@ -34,6 +34,7 @@ from typing import Any
 
 import strawberry
 from django.db.models import QuerySet
+from strawberry_django.resolvers import django_resolver
 from strawberry_django_aggregates import (
     AggregateOp,
     compute_aggregation,
@@ -41,7 +42,8 @@ from strawberry_django_aggregates import (
 )
 
 from .aggregation import _ops_from_aggregate_blocks, _selected_fields
-from .filtering import _filter_lookups, where_to_q
+from .connection import capped_limit, validate_pagination
+from .filtering import _filter_lookups, filter_queryset, where_to_q
 
 
 def make_groups_field(
@@ -97,14 +99,15 @@ def make_groups_field(
     def filtered_queryset(info: strawberry.Info, where: Any) -> QuerySet[Any]:
         qs: QuerySet[Any] = get_queryset(info)
         if where is not None:
-            qs = qs.filter(
+            qs = filter_queryset(
+                qs,
                 where_to_q(
                     where,
                     id_column=id_column,
                     id_decode=id_decode,
                     field_decoders=field_decoders,
                     lookups=filter_lookups,
-                )
+                ),
             )
         return qs
 
@@ -119,6 +122,7 @@ def make_groups_field(
         offset: int | None = None,
     ) -> list[Any]:
         del self
+        validate_pagination(limit, offset)
         qs = filtered_queryset(info, where)
         # Owner-translated: wire inputs → compute_aggregation arguments. The
         # adapter never re-implements the spec / granularity / having parsing.
@@ -132,7 +136,7 @@ def make_groups_field(
             aggregates=requested,
             having=having_dict,
             order_by=order_terms,
-            limit=_capped(limit, max_groups),
+            limit=capped_limit(limit, max_groups),
             offset=offset or 0,
             json_paths=builder.json_paths,
         )
@@ -197,11 +201,11 @@ def make_groups_field(
     }
     return (
         strawberry.field(
-            resolver=resolve_groups,
+            resolver=django_resolver(resolve_groups),
             name=f"{resource_name}_groups",
         ),
         strawberry.field(
-            resolver=resolve_groups_count,
+            resolver=django_resolver(resolve_groups_count),
             name=f"{resource_name}_groups_count",
         ),
         [
@@ -234,20 +238,6 @@ def _requested_group_ops(
         for agg_field in _selected_fields(field.selections)
     ]
     return _ops_from_aggregate_blocks(blocks, json_paths)
-
-
-def _capped(limit: int | None, max_groups: int | None) -> int | None:
-    """Bound an offset page by the resource's ``max_groups`` ceiling.
-
-    NDC group pagination is offset-based; an omitted ``limit`` over a
-    high-cardinality dimension would otherwise materialize every group. The
-    ceiling bounds that; a smaller explicit ``limit`` is honored as-is.
-    """
-    if max_groups is None:
-        return limit
-    if limit is None:
-        return max_groups
-    return min(limit, max_groups)
 
 
 def _host_module(name: str) -> types.ModuleType:

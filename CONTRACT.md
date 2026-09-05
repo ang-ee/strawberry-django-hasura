@@ -11,6 +11,14 @@ The wire convention is **snake_case** (Hasura-default) — install
 `hasura_config()` (a `StrawberryConfig` name converter) on the schema so every
 column / argument name is verbatim, not camelCased.
 
+The builders pin their generated roots, arguments, inputs, and aggregate types.
+Consumer-owned output types are preserved; on a camelCase schema, explicitly
+name snake_case output fields. The examples below use `aggregate_name="Note"`
+to retain the legacy type prefix. Since 0.8, a builder's default prefix is the
+exact resource stem (`notesAggregate`, `notesGroupKey`, etc.), isolating two
+resources that share a node but expose different measures. Both builders accept
+the optional `aggregate_name` override; an override must be unique in a schema.
+
 ## Queries
 
 - **List** —
@@ -46,6 +54,10 @@ composition:
   exact strings on the wire), **not** `Float_comparison_exp`; a
   high-precision money/quantity value round-trips without a lossy double
 - JSON: `_contains` for object/list containment, plus equality/null operators
+- date / time: `Date_comparison_exp` and `Time_comparison_exp` preserve the
+  output scalar (`Date` / `Time`) for equality, ordering, and membership
+- explicit null comparison operands raise, including `_is_null: null`; omit
+  an operator to leave it unconstrained or use `_is_null: true` / `false`
 - composition: `_and: [notes_bool_exp!]`, `_or: [notes_bool_exp!]`,
   `_not: notes_bool_exp`
 
@@ -57,6 +69,9 @@ single-segment to-many field keeps the same convention. For example,
 `groups: ID_comparison_exp` and applies `_eq` as Django `Q(groups=<operand>)`,
 matching rows that contain that related value. A `field_id_decode["groups"]`
 decoder, when supplied, is applied before the same membership lookup.
+The resource composes a parent-key subquery for to-many predicates so matching
+multiple related values still yields one parent row. Lists, aggregate nodes,
+measures, groups, and group counts all preserve that parent cardinality.
 
 Model resources may also declare a filterable Django path through to-one
 relations, for example `filterable=["project__product"]`. The nested path is
@@ -118,12 +133,18 @@ lookup in its own `_LOOKUPS`.
   `order_by` enum (a client may pass `[{ word_count: desc }, { title: asc }]`).
 - `enum order_by { asc desc }`
 - Maps to Django `.order_by()` (`desc` → a `-` prefix).
+- The public `id` ordering column maps to `id_column`, including custom primary
+  keys. Unknown paths and to-many ordering paths fail at resource construction.
 
 ## Paging
 
 - bare `limit: Int` / `offset: Int` args → queryset slice. An unordered page
   gets a deterministic `pk` tiebreaker; a caller-supplied `order_by` must be
   *total* to page deterministically over it.
+- Negative limits and offsets raise consistently for ORM and row sources.
+  Optional `max_rows` caps lists and aggregate nodes; optional `max_groups`
+  caps group rows. Both default to `None`. Counts and aggregate math always
+  use the complete scoped, filtered source rather than the capped page.
 
 ## sqid / idType boundary
 
@@ -177,10 +198,39 @@ evaluates the `<res>_bool_exp` / `order_by` / paging in Python via
 transport-backed source pushes the predicate to its owner. The same `_bool_exp`
 operator set and fail-fast-on-unmapped-operator stance as the model path apply.
 
-In-memory NULL semantics follow the model path's default SQLite backend: NULLs
+In-memory NULL ordering follows the model path's default SQLite backend: NULLs
 sort **first on `asc`, last on `desc`**; a positive `_like`/`_ilike` does **not**
-match a NULL row (the negated family does, like Django's `~Q`); and an explicit
-`null` operand (e.g. `_gt: null`) carries no constraint — use `_is_null`.
+match a NULL row (the negated family does, like Django's `~Q`). An explicit
+`null` comparison operand raises in both paths — use `_is_null`. A null
+`where` or null column comparison object still represents an absent filter.
+
+Enum rows compare and sort by their stringified underlying values. JSON
+equality is structural and distinguishes booleans from numbers; `_contains`
+uses recursive object/array containment, with missing keys distinct from null.
+Plain JSON strings use equality for containment rather than substring matching.
+Date and Time inputs round-trip their corresponding scalar values.
+
+`InMemoryRowSource` does not cache rows on the request context: contexts can
+span operations, particularly over WebSockets. It materializes `get_rows` for
+each query/count resolution. A caller can memoize inside an explicitly
+operation-scoped source. `max_rows` and `aggregate_name` are supported by this
+builder as well.
+
+## Write and execution boundaries
+
+Non-editable fields, including forward M2M relations, are excluded from
+generated writes and rejected when explicitly allowlisted. Forward one-to-one
+inputs use the target scalar like FKs. File and image inputs use the native
+Strawberry Django `Upload` mapping; transport configuration, authorization,
+and file validation remain consumer concerns. Columns with `db_default` can
+be omitted from inserts so Django applies the database default.
+
+ORM roots compose Strawberry Django's resolver and optimizer facilities for
+sync and async execution. Sources supplied to the builder define root row
+scope; the builder does not apply a second node-level `get_queryset` policy
+after pagination. Backend authorization, validation, relation-ID checks and
+transactionality remain in the caller's `WriteBackend`. GraphQL meta fields
+such as `__typename` are never forwarded as ORM aggregate measures.
 
 ## Nested object insert (opt-in, additive)
 

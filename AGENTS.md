@@ -49,6 +49,23 @@ The generated `<res>_bool_exp` references itself (`_and`/`_or`/`_not`), so the
 generated types are hosted in a per-resource synthetic module for forward-ref
 resolution at schema build.
 
+Each construction gets its own synthetic module so independent schemas can
+reuse resource names without rebinding their recursive inputs. Native aggregate
+and grouping type prefixes default to the exact resource stem; `aggregate_name`
+can select a legacy prefix that must be unique in the consuming schema.
+Only generated types are snake-pinned. Caller-owned output nodes keep their
+declared names; explicitly name their snake_case fields or use
+`hasura_config()` at schema level.
+
+ORM resolvers compose `strawberry_django.resolvers.django_resolver` for sync and
+async safety. Lists, details and aggregate nodes compose `optimize()` before
+queryset evaluation. Root row scoping belongs to the supplied source callback;
+do not replay a node's `get_queryset` on an already paginated queryset.
+To-many predicates use a parent-PK subquery so counts and rows stay consistent.
+`max_rows` caps lists/nodes and `max_groups` caps grouped pages without capping
+aggregate math or group counts. The in-memory source does not retain cached
+rows on potentially multi-operation contexts.
+
 ## The aggregate is FREE — wire, don't reshape
 
 This is the headline of the Hasura dialect. The native `<Model>Aggregate` type

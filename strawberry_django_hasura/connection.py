@@ -18,10 +18,33 @@ from typing import Any
 
 import strawberry
 from django.db.models import QuerySet
+from strawberry_django.optimizer import optimize
+from strawberry_django.resolvers import django_resolver
+
+
+def validate_pagination(limit: int | None, offset: int | None) -> None:
+    """Reject negative page boundaries before handing them to the ORM."""
+    for name, value in (("limit", limit), ("offset", offset)):
+        if value is not None and value < 0:
+            raise ValueError(f"{name} must be greater than or equal to zero")
+
+
+def capped_limit(limit: int | None, maximum: int | None) -> int | None:
+    """Validate and cap an optional page size without bounding its total."""
+    validate_pagination(limit, None)
+    if maximum is not None and maximum < 0:
+        raise ValueError("maximum must be greater than or equal to zero")
+    if maximum is None:
+        return limit
+    return maximum if limit is None else min(limit, maximum)
 
 
 def paginate(
-    queryset: QuerySet[Any], limit: int | None, offset: int | None
+    queryset: QuerySet[Any],
+    limit: int | None,
+    offset: int | None,
+    *,
+    maximum: int | None = None,
 ) -> QuerySet[Any]:
     """Apply Hasura ``limit`` / ``offset`` to a queryset (slice).
 
@@ -33,6 +56,8 @@ def paginate(
     over it to be deterministic that ordering must be *total* (e.g. end on a
     unique column).
     """
+    validate_pagination(limit, offset)
+    limit = capped_limit(limit, maximum)
     if not queryset.ordered:
         queryset = queryset.order_by("pk")
     start = offset or 0
@@ -49,6 +74,7 @@ def make_aggregate_container(
     filtered_queryset: Callable[[Any, Any], QuerySet[Any]],
     filtered_nodes_queryset: Callable[[Any, Any], QuerySet[Any]] | None = None,
     aggregate_resolver: Callable[[Any, Callable[[Any], QuerySet[Any]]], Any],
+    max_rows: int | None = None,
 ) -> type:
     """Build the ``<resource>_aggregate`` container type for one model.
 
@@ -84,7 +110,13 @@ def make_aggregate_container(
 
     def resolve_nodes(self: Any, info: strawberry.Info) -> Any:
         source = filtered_nodes_queryset or filtered_queryset
-        return source(info, self.where)
+        queryset = source(info, self.where)
+        queryset = (
+            paginate(queryset, max_rows, None)
+            if max_rows is not None
+            else queryset
+        )
+        return optimize(queryset, info)
 
     resolve_nodes.__annotations__ = {
         "self": Any,
@@ -98,8 +130,12 @@ def make_aggregate_container(
         "__annotations__": {
             "where": strawberry.Private[Any],  # type: ignore[misc]
         },
-        "aggregate": strawberry.field(resolver=resolve_aggregate),
-        "nodes": strawberry.field(resolver=resolve_nodes),
+        "aggregate": strawberry.field(
+            resolver=django_resolver(resolve_aggregate)
+        ),
+        "nodes": strawberry.field(
+            resolver=django_resolver(resolve_nodes),
+        ),
     }
     container = type(f"{name}__container", (), namespace)
     return strawberry.type(container, name=name)

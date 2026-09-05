@@ -1,13 +1,12 @@
 """Regression guard: the Hasura read resolvers lean on strawberry-django's
 ``DjangoOptimizerExtension`` instead of N+1-ing nested relations.
 
-The adapter does not reimplement query optimization — it hands the optimizer a
-lazy queryset and lets ``select_related`` / ``prefetch_related`` / ``.only()``
-do their job. Two ways that hand-off can break, both guarded here:
+The adapter does not reimplement query optimization — it hands the public
+optimizer a lazy queryset before ``django_resolver`` evaluates it in a safe
+sync context. Two ways that hand-off can break, both guarded here:
 
-- **list / nodes** return the lazy queryset; the extension auto-optimizes it.
-  Re-introducing ``list(...)`` evaluates the queryset before the optimizer's
-  ``_result_cache is None`` gate, so nested loads scale with the row count.
+- **list / nodes** compose ``optimize()`` before queryset evaluation.
+  Evaluating before optimization would make nested loads scale with row count.
   Guard: the query count is CONSTANT across page sizes (the N+1 signature is a
   *growing* count).
 - **by_pk** evaluates eagerly via ``.first()``, so it must compose
