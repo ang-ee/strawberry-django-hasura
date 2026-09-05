@@ -58,7 +58,7 @@ class _NoWrites:
     def delete(self, info: Any, pk: str) -> Any: ...
 
 
-def _build_schema() -> strawberry.Schema:
+def _build_schema(*, optimizer: bool = True) -> strawberry.Schema:
     resource = hasura_resource(
         BookType,
         model=BookModel,
@@ -75,7 +75,7 @@ def _build_schema() -> strawberry.Schema:
     return strawberry.Schema(
         query=resource.query,
         types=resource.types,
-        extensions=[DjangoOptimizerExtension],
+        extensions=[DjangoOptimizerExtension] if optimizer else [],
     )
 
 
@@ -120,10 +120,11 @@ def _sql(ctx: CaptureQueriesContext) -> str:
 
 
 @pytest.mark.django_db
-def test_list_query_count_is_constant_across_page_sizes() -> None:
+@pytest.mark.parametrize("optimizer", [False, True])
+def test_list_query_count_is_constant_across_page_sizes(optimizer) -> None:
     """N+1 would make the count GROW with the page size; the optimizer keeps
     it flat (one query for the rows + their FK JOIN, one prefetch for tags)."""
-    schema = _build_schema()
+    schema = _build_schema(optimizer=optimizer)
     counts: dict[int, int] = {}
     last_ctx: CaptureQueriesContext | None = None
     for size in (1, 3, 10):
@@ -147,10 +148,11 @@ def test_list_query_count_is_constant_across_page_sizes() -> None:
 
 
 @pytest.mark.django_db
-def test_by_pk_folds_to_one_relation_into_the_row_query() -> None:
+@pytest.mark.parametrize("optimizer", [False, True])
+def test_by_pk_folds_to_one_relation_into_the_row_query(optimizer) -> None:
     """by_pk composes ``optimize()`` so the to-one ``author`` is a JOIN, not a
     second SELECT: row+author = 1 query, tags prefetch = 1 query."""
-    schema = _build_schema()
+    schema = _build_schema(optimizer=optimizer)
     _seed(3)
     target = BookModel.objects.get(title="Book 1")
     with CaptureQueriesContext(connection) as ctx:

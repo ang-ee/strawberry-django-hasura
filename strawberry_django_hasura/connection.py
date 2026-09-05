@@ -18,8 +18,18 @@ from typing import Any
 
 import strawberry
 from django.db.models import QuerySet
-from strawberry_django.optimizer import optimize
+from strawberry_django import optimizer
 from strawberry_django.resolvers import django_resolver
+
+
+def _optimize_queryset(
+    queryset: QuerySet[Any], info: strawberry.Info
+) -> QuerySet[Any]:
+    """Compose the active extension before the ORM resolver evaluates rows."""
+    extension = optimizer.optimizer.get()
+    if extension is not None:
+        return extension.optimize(queryset, info=info)
+    return optimizer.optimize(queryset, info)
 
 
 def validate_pagination(limit: int | None, offset: int | None) -> None:
@@ -116,7 +126,7 @@ def make_aggregate_container(
             if max_rows is not None
             else queryset
         )
-        return optimize(queryset, info)
+        return _optimize_queryset(queryset, info)
 
     resolve_nodes.__annotations__ = {
         "self": Any,

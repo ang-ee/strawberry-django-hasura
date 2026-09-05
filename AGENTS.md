@@ -58,8 +58,9 @@ declared names; explicitly name their snake_case fields or use
 `hasura_config()` at schema level.
 
 ORM resolvers compose `strawberry_django.resolvers.django_resolver` for sync and
-async safety. Lists, details and aggregate nodes compose `optimize()` before
-queryset evaluation. Root row scoping belongs to the supplied source callback;
+async safety. Lists, details and aggregate nodes compose the active optimizer extension
+before queryset evaluation, with native `optimize()` as the fallback only when
+no extension is active. Root row scoping belongs to the supplied source callback;
 do not replay a node's `get_queryset` on an already paginated queryset.
 To-many predicates use a parent-PK subquery so counts and rows stay consistent.
 `max_rows` caps lists/nodes and `max_groups` caps grouped pages without capping
