@@ -21,7 +21,14 @@ from .filtering import comparison_to_q, where_to_q
 from .grouping import GroupByExpressionProvider
 from .mutations import input_to_dict
 from .naming import SnakeNameConverter, hasura_config
-from .ordering import OrderBy, SortAlias, apply_ordering, order_clauses
+from .ordering import (
+    OrderBy,
+    SortAlias,
+    SortAliasExpression,
+    apply_ordering,
+    order_clauses,
+    prepare_sort_aliases,
+)
 from .resource import (
     FilterablePathError,
     HasuraResource,
@@ -44,9 +51,10 @@ __all__ = [
     "InMemoryRowSource",
     "NestedInsert",
     "OrderBy",
-    "SortAlias",
     "RowSource",
     "SnakeNameConverter",
+    "SortAlias",
+    "SortAliasExpression",
     "WriteBackend",
     "apply_in_memory",
     "apply_ordering",
@@ -60,6 +68,7 @@ __all__ = [
     "make_aggregate_resolver",
     "order_clauses",
     "paginate",
+    "prepare_sort_aliases",
     "where_matches",
     "where_to_q",
 ]

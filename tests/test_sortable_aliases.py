@@ -127,11 +127,11 @@ def test_alias_annotation_is_required_only_when_selected():
 
 
 @pytest.mark.django_db
-def test_alias_expression_is_prepared_only_for_resolved_ordering():
+def test_alias_expression_is_prepared_only_for_resolved_ordering(rows):
     prepared = []
 
-    def title_expression(queryset):
-        prepared.append(queryset)
+    def title_expression(info, queryset):
+        prepared.append((info, queryset))
         return Lower(Coalesce("optional_title", Value("")))
 
     schema = schema_for(
@@ -140,17 +140,61 @@ def test_alias_expression_is_prepared_only_for_resolved_ordering():
             annotated=False,
         )
     )
-    result = schema.execute_sync("{alias_rows(order_by:[{score:asc}]){id}}")
-    assert result.errors is None, result.errors
+    for query in (
+        "{alias_rows(order_by:[{score:asc}]){id}}",
+        "{alias_rows{id}}",
+        "{alias_rows(order_by:[]){id}}",
+        "{alias_rows(order_by:null){id}}",
+    ):
+        result = schema.execute_sync(query)
+        assert result.errors is None, result.errors
     assert prepared == []
 
-    result = schema.execute_sync(
-        "query($order:[alias_rows_order_by!]) {"
-        "alias_rows(order_by:$order){id}}",
-        variable_values={"order": [{"title": "asc"}]},
-    )
+    with CaptureQueriesContext(connection) as queries:
+        result = schema.execute_sync(
+            "query($order:[alias_rows_order_by!]) {"
+            "alias_rows(order_by:$order){id}}",
+            variable_values={"order": [{"title": "desc"}]},
+        )
     assert result.errors is None, result.errors
+    assert result.data["alias_rows"] == [
+        {"id": value} for value in ["b", "a", "c", "n"]
+    ]
     assert len(prepared) == 1
+    info, queryset = prepared[0]
+    assert isinstance(info, strawberry.Info)
+    assert '"status" = public' in str(queryset.query)  # scoped source
+    sql = queries[0]["sql"]
+    assert "LOWER(COALESCE(" in sql
+    assert sql.count("LOWER(COALESCE(") == 1  # aliased, never selected
+
+
+@pytest.mark.django_db
+def test_lazy_alias_over_source_annotation_or_bad_result_fails(rows):
+    schema = schema_for(
+        alias_resource(
+            aliases={
+                "title": SortAlias("_sort_title", lambda info, qs: Lower("x"))
+            },
+            annotated=True,
+        )
+    )
+    result = schema.execute_sync("{alias_rows(order_by:[{title:asc}]){id}}")
+    assert result.errors
+    assert "already installed by the source" in result.errors[0].message
+
+    schema = schema_for(
+        alias_resource(
+            aliases={"title": SortAlias("_sort_title", lambda info, qs: None)},
+            annotated=False,
+        )
+    )
+    result = schema.execute_sync("{alias_rows(order_by:[{title:asc}]){id}}")
+    assert result.errors
+    assert result.errors[0].message == (
+        "Sortable alias expression for '_sort_title' must return a Django "
+        "expression, not NoneType"
+    )
 
 
 @pytest.mark.parametrize(
@@ -166,6 +210,16 @@ def test_alias_expression_is_prepared_only_for_resolved_ordering():
         (["1title"], {"1title": "_sort_title"}),
         (["__title"], {"__title": "_sort_title"}),
         (["some-title"], {"some-title": "_sort_title"}),
+        (["title"], {"title": lambda info, qs: Lower("title")}),
+        (["title"], {"title": SortAlias(None)}),
+        (["title"], {"title": SortAlias("_sort_title", Lower("title"))}),
+        (
+            ["title", "other"],
+            {
+                "title": SortAlias("_sort_title", lambda info, qs: Lower("x")),
+                "other": "_sort_title",
+            },
+        ),
     ],
 )
 def test_invalid_alias_declarations_fail_at_construction(sortable, aliases):

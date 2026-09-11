@@ -144,16 +144,26 @@ lookup in its own `_LOOKUPS`.
   A selected alias whose target is absent from `queryset.query.annotations`
   fails before execution; an unselected alias needs no annotation.
 - `SortAlias("_sender_name", expression_provider)` is the lazy form of the same
-  declaration. The provider receives the resource's already-scoped queryset and
-  returns the Django expression for that alias. The ordering owner invokes it
-  only when the resolved `order_by` selects `sender_name`; omitted, null, empty,
-  and unrelated ordering inputs do not prepare it. Plain string aliases remain
-  the compatibility form for annotations already installed by `get_queryset`.
+  declaration. `prepare_sort_aliases` calls `expression_provider(info,
+  queryset)` only when the resolved `order_by` selects `sender_name` and
+  installs the returned Django expression with `.alias()` (never selected);
+  omitted, null, empty, and unrelated ordering inputs do not prepare it. The
+  queryset is the request's already-scoped and `where`-filtered source, so the
+  expression must be per-row (`F`, `Func`, an `OuterRef`-correlated
+  `Subquery`); deriving data from the queryset itself would make the sort key
+  depend on the request. A non-callable provider, a lazy path shared by another
+  alias, or a bare callable without the `SortAlias` wrapper fails at
+  construction; a provider that returns a non-expression, or targets an
+  annotation the source already installed, fails before execution. Plain
+  string aliases remain the compatibility form for annotations already
+  installed by `get_queryset`.
 - `get_queryset` owns annotation expressions, authorization, NULL behavior
-  and one-row-per-object cardinality. A lazy alias expression must preserve that
-  scoped source and its authorization boundary. Aliases do not add filters,
-  aggregate fields, grouped dimensions or output fields. Aggregate nodes retain
-  their existing source-order behavior.
+  and one-row-per-object cardinality; a lazy alias expression must preserve
+  that scoped source and its authorization boundary. `apply_ordering` only
+  translates names and never adds SQL — lazy preparation is a separate step
+  composed before it. Aliases do not add filters, aggregate fields, grouped
+  dimensions or output fields. Aggregate nodes retain their existing
+  source-order behavior.
 - An explicit ORM `order_by` appends the model primary key ascending when it
   is not already selected, including after annotation aliases. This makes
   tied values stable across offset pages; an explicit PK direction is kept.

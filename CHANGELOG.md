@@ -5,6 +5,19 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-09-11
+
+### Added
+
+- `SortAlias(path, expression)` declares a lazily prepared sortable alias.
+  The new `prepare_sort_aliases` primitive, composed before `apply_ordering`
+  by the list root, calls `expression(info, queryset)` only when `order_by`
+  selects the alias and installs the result with `.alias()`. Plain string
+  aliases keep their source-installed semantics, and `apply_ordering` stays a
+  pure name translation. Invalid providers, shared lazy paths and bare
+  callables fail at construction; a non-expression result or a path the
+  source already annotated fails before execution.
+
 ## [0.10.0] — 2026-09-06
 
 ### Added
