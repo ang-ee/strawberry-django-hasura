@@ -79,7 +79,7 @@ from .inputs import (
     pin_snake_wire_names as _pin_snake_wire_names,
 )
 from .mutations import input_to_dict
-from .ordering import apply_ordering, validate_sortable
+from .ordering import SortAlias, apply_ordering, validate_sortable
 
 
 class FilterablePathError(ValueError):
@@ -565,7 +565,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     filterable: list[str],
     sortable: list[str],
     aggregatable: list[str],
-    sortable_aliases: Mapping[str, str] | None = None,
+    sortable_aliases: Mapping[str, str | SortAlias] | None = None,
     aggregate_name: str | None = None,
     groupable: list[str] | None = None,
     json_paths: Mapping[str, str] | None = None,

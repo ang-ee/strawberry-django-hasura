@@ -15,12 +15,13 @@ from __future__ import annotations
 import dataclasses
 import enum
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import strawberry
 from django.core.exceptions import FieldDoesNotExist
-from django.db.models import Model, QuerySet
+from django.db.models import Expression, Model, QuerySet
 from strawberry import UNSET
 
 
@@ -34,21 +35,48 @@ class OrderBy(enum.Enum):
     desc = "desc"
 
 
+@dataclass(frozen=True)
+class SortAlias:
+    """A queryset alias whose expression is installed only when ordered."""
+
+    path: str
+    expression: Callable[[QuerySet[Any]], Expression] | None = None
+
+    def prepare(self, queryset: QuerySet[Any]) -> QuerySet[Any]:
+        """Install the alias without selecting its value."""
+
+        if self.expression is None:
+            return queryset
+        value: Expression = self.expression(queryset)
+        return queryset.alias(**{self.path: value})
+
+
+def _sort_aliases(
+    aliases: Mapping[str, str | SortAlias] | None,
+) -> dict[str, SortAlias]:
+    """Normalize the public alias declaration at the ordering boundary."""
+
+    return {
+        name: alias if isinstance(alias, SortAlias) else SortAlias(alias)
+        for name, alias in (aliases or {}).items()
+    }
+
+
 def validate_sortable(
     model: type[Model],
     fields: list[str],
     *,
     id_column: str = "pk",
-    sortable_aliases: Mapping[str, str] | None = None,
+    sortable_aliases: Mapping[str, str | SortAlias] | None = None,
 ) -> None:
     """Allow scalar/to-one ORM paths and reject row-multiplying sorts."""
-    aliases = sortable_aliases or {}
+    aliases = _sort_aliases(sortable_aliases)
     native_names = {
         name
         for field in model._meta.get_fields()
         for name in (field.name, getattr(field, "attname", field.name))
     } | {"id", "pk", id_column}
-    for wire_name, annotation in aliases.items():
+    for wire_name, alias in aliases.items():
         if (
             not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", wire_name)
             or "__" in wire_name
@@ -60,9 +88,9 @@ def validate_sortable(
                 "non-colliding wire field"
             )
         if (
-            not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", annotation)
-            or "__" in annotation
-            or annotation in native_names
+            not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias.path)
+            or "__" in alias.path
+            or alias.path in native_names
         ):
             raise ValueError(
                 f"Sortable alias {wire_name!r} must target an annotation "
@@ -101,13 +129,25 @@ def order_clauses(
     order_by: list[Any] | None,
     *,
     id_column: str = "id",
-    sortable_aliases: Mapping[str, str] | None = None,
+    sortable_aliases: Mapping[str, str | SortAlias] | None = None,
 ) -> list[str]:
     """Flatten a Hasura ``order_by`` list into Django ``.order_by()`` clauses.
 
     Iterates inputs (then fields within each) in declaration order so the
     emitted clause order is deterministic and matches the wire order.
     """
+    aliases = _sort_aliases(sortable_aliases)
+    return _order_clauses(order_by, id_column=id_column, aliases=aliases)
+
+
+def _order_clauses(
+    order_by: list[Any] | None,
+    *,
+    id_column: str,
+    aliases: Mapping[str, SortAlias],
+) -> list[str]:
+    """Build clauses from aliases already normalized at the public boundary."""
+
     clauses: list[str] = []
     for entry in order_by or []:
         for f in dataclasses.fields(entry):
@@ -115,7 +155,7 @@ def order_clauses(
             if direction is UNSET or direction is None:
                 continue
             prefix = "-" if direction is OrderBy.desc else ""
-            column = (sortable_aliases or {}).get(f.name, f.name)
+            column = aliases[f.name].path if f.name in aliases else f.name
             if f.name == "id":
                 column = id_column
             clauses.append(f"{prefix}{column}")
@@ -127,20 +167,22 @@ def apply_ordering(
     order_by: list[Any] | None,
     *,
     id_column: str = "id",
-    sortable_aliases: Mapping[str, str] | None = None,
+    sortable_aliases: Mapping[str, str | SortAlias] | None = None,
 ) -> QuerySet[Any]:
     """Order native fields/annotations, adding a PK tie breaker when absent.
 
     The source owns annotation expressions and row cardinality. Only selected
     aliases must be present; an empty input preserves source ordering.
     """
-    clauses = order_clauses(
-        order_by, id_column=id_column, sortable_aliases=sortable_aliases
-    )
+    aliases = _sort_aliases(sortable_aliases)
+    clauses = _order_clauses(order_by, id_column=id_column, aliases=aliases)
     if not clauses:
         return queryset
     selected = {clause.removeprefix("-") for clause in clauses}
-    for wire_name, annotation in (sortable_aliases or {}).items():
+    for wire_name, alias in aliases.items():
+        annotation = alias.path
+        if annotation in selected:
+            queryset = alias.prepare(queryset)
         if (
             annotation in selected
             and annotation not in queryset.query.annotations

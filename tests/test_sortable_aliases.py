@@ -11,7 +11,12 @@ from django.db.models import Value
 from django.db.models.functions import Coalesce, Lower
 from django.test.utils import CaptureQueriesContext
 
-from strawberry_django_hasura import OrderBy, apply_ordering, hasura_resource
+from strawberry_django_hasura import (
+    OrderBy,
+    SortAlias,
+    apply_ordering,
+    hasura_resource,
+)
 from tests.models import ReadBoundaryModel
 from tests.test_read_boundaries import ReadBoundaryNode
 
@@ -119,6 +124,33 @@ def test_alias_annotation_is_required_only_when_selected():
         "Sortable alias 'title' requires queryset annotation '_sort_title'"
     )
     assert len(queries) == 0
+
+
+@pytest.mark.django_db
+def test_alias_expression_is_prepared_only_for_resolved_ordering():
+    prepared = []
+
+    def title_expression(queryset):
+        prepared.append(queryset)
+        return Lower(Coalesce("optional_title", Value("")))
+
+    schema = schema_for(
+        alias_resource(
+            aliases={"title": SortAlias("_sort_title", title_expression)},
+            annotated=False,
+        )
+    )
+    result = schema.execute_sync("{alias_rows(order_by:[{score:asc}]){id}}")
+    assert result.errors is None, result.errors
+    assert prepared == []
+
+    result = schema.execute_sync(
+        "query($order:[alias_rows_order_by!]) {"
+        "alias_rows(order_by:$order){id}}",
+        variable_values={"order": [{"title": "asc"}]},
+    )
+    assert result.errors is None, result.errors
+    assert len(prepared) == 1
 
 
 @pytest.mark.parametrize(
