@@ -143,10 +143,17 @@ lookup in its own `_LOOKUPS`.
   without `__`, and may not collide with model fields, `pk`, or public `id`.
   A selected alias whose target is absent from `queryset.query.annotations`
   fails before execution; an unselected alias needs no annotation.
+- `SortAlias("_sender_name", expression_provider)` is the lazy form of the same
+  declaration. The provider receives the resource's already-scoped queryset and
+  returns the Django expression for that alias. The ordering owner invokes it
+  only when the resolved `order_by` selects `sender_name`; omitted, null, empty,
+  and unrelated ordering inputs do not prepare it. Plain string aliases remain
+  the compatibility form for annotations already installed by `get_queryset`.
 - `get_queryset` owns annotation expressions, authorization, NULL behavior
-  and one-row-per-object cardinality. The adapter only translates names;
-  aliases do not add filters, aggregate fields, grouped dimensions or output
-  fields. Aggregate nodes retain their existing source-order behavior.
+  and one-row-per-object cardinality. A lazy alias expression must preserve that
+  scoped source and its authorization boundary. Aliases do not add filters,
+  aggregate fields, grouped dimensions or output fields. Aggregate nodes retain
+  their existing source-order behavior.
 - An explicit ORM `order_by` appends the model primary key ascending when it
   is not already selected, including after annotation aliases. This makes
   tied values stable across offset pages; an explicit PK direction is kept.
