@@ -28,17 +28,23 @@ from strawberry.types import get_object_definition
 
 
 def input_to_dict(value: Any) -> dict[str, Any]:
-    """Return the set (non-UNSET) fields of a strawberry input as kwargs."""
+    """Return declared fields and public instance extras, skipping UNSET."""
     out: dict[str, Any] = {}
-    definitions = (
-        value.__strawberry_definition__,
-        *getattr(type(value), "strawberry_input_extension_definitions", ()),
-    )
-    for definition in definitions:
-        for field in definition.fields:
-            v = getattr(value, field.python_name, UNSET)
-            if v is not UNSET:
-                out[field.python_name] = _reduce(v)
+    fields = value.__strawberry_definition__.fields
+    declared_names = {field.python_name for field in fields}
+    for field in fields:
+        v = getattr(value, field.python_name, UNSET)
+        if v is not UNSET:
+            out[field.python_name] = _reduce(v)
+    # Input extensions may exist only as values on the converted instance.
+    # Slotted inputs without an instance dictionary have no extras.
+    for name, v in getattr(value, "__dict__", {}).items():
+        if (
+            name not in declared_names
+            and not name.startswith("_")
+            and v is not UNSET
+        ):
+            out[name] = _reduce(v)
     return out
 
 

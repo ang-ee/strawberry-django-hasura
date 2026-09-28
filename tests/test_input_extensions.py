@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from inspect import signature
+
 import pytest
 import strawberry
 
@@ -27,7 +30,6 @@ def test_plain_input_preserves_python_names_order_and_unset_handling():
         enabled: bool = False
 
     value = PlainInput(title="Plain")
-    value.undeclared = "not an input field"
 
     assert list(input_to_dict(value).items()) == [
         ("title", "Plain"),
@@ -37,16 +39,16 @@ def test_plain_input_preserves_python_names_order_and_unset_handling():
     ]
 
 
-@strawberry.input
-class WriteExtension:
-    write_only: str | None = strawberry.field(
-        name="writeOnly", default=strawberry.UNSET
-    )
+def test_slotted_input_has_no_extra_attributes():
+    @strawberry.input
+    @dataclass(slots=True)
+    class SlottedInput:
+        title: str
+        omitted: str | None = strawberry.UNSET
 
-
-@strawberry.input
-class AuditExtension:
-    audit_tag: str = strawberry.UNSET
+    value = SlottedInput(title="Slotted")
+    assert not hasattr(value, "__dict__")
+    assert input_to_dict(value) == {"title": "Slotted"}
 
 
 @pytest.mark.parametrize("operation", ["insert", "update"])
@@ -58,7 +60,12 @@ class AuditExtension:
             {"write_only": "new value", "audit_tag": "reviewed"},
         ),
         ({"write_only": None}, {"write_only": None}),
+        (
+            {"enabled": False, "attempts": 0, "note": ""},
+            {"enabled": False, "attempts": 0, "note": ""},
+        ),
         ({"write_only": strawberry.UNSET}, {}),
+        ({"_internal": "ignored", "__private": "ignored"}, {}),
         ({}, {}),
     ],
 )
@@ -72,12 +79,8 @@ def test_input_extensions_reach_create_and_update(
         if operation == "insert"
         else resource.set_input_type
     )
-    # Simulate the metadata and setattr calls made by an extension-capable
-    # Strawberry converter, then exercise the generated resolver boundary.
-    input_type.strawberry_input_extension_definitions = (
-        WriteExtension.__strawberry_definition__,
-        AuditExtension.__strawberry_definition__,
-    )
+    # Extension-capable converters set converted values on the instance;
+    # the input class has no extension-definition metadata.
     value = input_type(title="Example")
     for name, field_value in attributes.items():
         setattr(value, name, field_value)
@@ -101,11 +104,6 @@ class AnnotationInput:
     label: str
 
 
-@strawberry.input
-class ChapterExtension:
-    annotation: AnnotationInput | None = strawberry.UNSET
-
-
 @pytest.mark.parametrize(
     "extension_value",
     [AnnotationInput(label="reviewed"), None, strawberry.UNSET],
@@ -122,11 +120,9 @@ def test_nested_insert_reduces_extension_fields(extension_value):
     backend = CapturingBackend()
     resource = _book_with_chapters_resource(write_backend=backend)
     child_type = resource.nested_input_types["chapters"]
-    child_type.strawberry_input_extension_definitions = (
-        ChapterExtension.__strawberry_definition__,
-    )
     child = child_type(title="Parsing", position=1)
     child.annotation = extension_value
+    child._internal = "ignored"
     value = resource.insert_input_type(
         title="Compiler",
         author="author-42",
@@ -150,3 +146,41 @@ def test_nested_insert_reduces_extension_fields(extension_value):
     assert list(backend.calls[0]["chapters"]["data"][0]) == list(
         expected_child
     )
+
+
+@pytest.mark.skipif(
+    "extend" not in signature(strawberry.input).parameters,
+    reason="Installed Strawberry does not support input extensions",
+)
+def test_input_extensions_through_schema_execution():
+    backend = RecordingWriteBackend()
+    resource = _resource(backend)
+
+    @strawberry.input(name="write_boundaries_insert_input", extend=True)
+    class InsertExtension:
+        password: str | None = strawberry.UNSET
+
+    @strawberry.input(name="write_boundaries_set_input", extend=True)
+    class UpdateExtension:
+        password: str | None = strawberry.UNSET
+
+    schema = strawberry.Schema(
+        query=resource.query,
+        mutation=resource.mutation,
+        types=[*resource.types, InsertExtension, UpdateExtension],
+    )
+    result = schema.execute_sync("""mutation {
+      insert_write_boundaries_one(
+        object: {title: "new", password: "first-secret"}
+      ) { title }
+      update_write_boundaries_by_pk(
+        pk_columns: {id: "opaque-42"},
+        _set: {title: "changed", password: "second-secret"}
+      ) { title }
+    }""")
+
+    assert result.errors is None, result.errors
+    assert backend.calls == [
+        {"title": "new", "password": "first-secret"},
+        {"title": "changed", "password": "second-secret"},
+    ]

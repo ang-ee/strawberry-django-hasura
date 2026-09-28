@@ -147,8 +147,8 @@ node types belong to the consumer: explicitly name snake_case output fields,
 as above, or use `hasura_config()` on a schema dedicated to this dialect. The
 builder never changes a shared output type's names.
 
-Where the Strawberry build supports input extensions, their fields are
-forwarded in mutation envelopes like declared fields, including nested inputs.
+See the [input-extension forwarding contract](./CONTRACT.md#write-and-execution-boundaries)
+for values added to converted mutation inputs.
 
 ### Caller-declared insert and update arguments
 
