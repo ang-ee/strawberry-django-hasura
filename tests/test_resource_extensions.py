@@ -7,9 +7,135 @@ import strawberry
 import strawberry_django
 from strawberry import auto
 
-from strawberry_django_hasura import hasura_resource
+from strawberry_django_hasura import HasuraResource, hasura_resource
 from tests.demo_schema import Note, NoteWriteBackend
 from tests.models import AuthorModel, BookModel, ChapterModel, NoteModel
+from tests.test_write_boundaries import RecordingWriteBackend, _resource
+
+
+@pytest.mark.parametrize("operation", ["insert", "update"])
+@pytest.mark.parametrize("name", ["object", "pk_columns", "_set"])
+def test_reserved_mutation_argument_names_fail_at_construction(
+    operation, name
+):
+    with pytest.raises(TypeError, match=rf"{operation}_arguments.*reserved"):
+        _resource(
+            RecordingWriteBackend(),
+            **{f"{operation}_arguments": {name: str}},
+        )
+
+
+@pytest.mark.parametrize("operation", ["insert", "update"])
+def test_mutation_arguments_require_enabled_operation(operation):
+    with pytest.raises(TypeError, match=rf"requires {operation}=True"):
+        _resource(
+            RecordingWriteBackend(),
+            **{operation: False, f"{operation}_arguments": {"reason": str}},
+        )
+
+
+@pytest.mark.parametrize(
+    ("operation", "method"), [("insert", "create"), ("update", "update")]
+)
+@pytest.mark.parametrize("positional_only", [False, True])
+def test_mutation_arguments_require_backend_keyword_support(
+    operation, method, positional_only
+):
+    backend = RecordingWriteBackend()
+    if positional_only:
+
+        def callback(reason, /, *args):
+            raise AssertionError("construction must not call the backend")
+
+        setattr(backend, method, callback)
+
+    with pytest.raises(TypeError) as error:
+        _resource(backend, **{f"{operation}_arguments": {"reason": str}})
+
+    assert str(error.value) == (
+        f"write_backend.{method} does not accept "
+        f"{operation}_arguments ['reason']"
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "method"), [("insert", "create"), ("update", "update")]
+)
+@pytest.mark.parametrize("keyword_only", [False, True])
+def test_mutation_arguments_accept_explicit_backend_parameters(
+    operation, method, keyword_only
+):
+    def positional(info, pk_or_data, data=None, reason=None):
+        raise AssertionError("construction must not call the backend")
+
+    def keyword(*args, reason=None):
+        raise AssertionError("construction must not call the backend")
+
+    backend = RecordingWriteBackend()
+    setattr(backend, method, keyword if keyword_only else positional)
+    resource = _resource(
+        backend, **{f"{operation}_arguments": {"reason": str}}
+    )
+    assert getattr(resource, f"{operation}_argument_names") == ("reason",)
+    with pytest.raises(TypeError, match=r"arguments \['unsupported'\]"):
+        _resource(
+            backend,
+            **{f"{operation}_arguments": {"reason": str, "unsupported": int}},
+        )
+
+
+@pytest.mark.parametrize(
+    ("operation", "method"), [("insert", "create"), ("update", "update")]
+)
+@pytest.mark.parametrize("error_type", [TypeError, ValueError])
+def test_mutation_arguments_allow_uninspectable_backend(
+    operation, method, error_type
+):
+    class OpaqueCallable:
+        @property
+        def __signature__(self):
+            raise error_type("signature unavailable")
+
+        def __call__(self, *args, **kwargs):
+            raise AssertionError("construction must not call the backend")
+
+    backend = RecordingWriteBackend()
+    setattr(backend, method, OpaqueCallable())
+    resource = _resource(
+        backend, **{f"{operation}_arguments": {"reason": str}}
+    )
+    assert getattr(resource, f"{operation}_argument_names") == ("reason",)
+
+
+@pytest.mark.parametrize("operation", ["insert", "update"])
+@pytest.mark.parametrize("argument_type", ["int", None])
+def test_mutation_argument_types_must_not_be_strings_or_none(
+    operation, argument_type
+):
+    with pytest.raises(
+        TypeError,
+        match="must be an input type, not a string annotation or None",
+    ):
+        _resource(
+            RecordingWriteBackend(),
+            **{f"{operation}_arguments": {"reason": argument_type}},
+        )
+
+
+def test_argument_metadata_defaults_empty():
+    resource = HasuraResource(
+        type("Query", (), {}), type("Mutation", (), {}), []
+    )
+    assert resource.insert_argument_names == ()
+    assert resource.update_argument_names == ()
+
+
+def test_empty_mutation_argument_mappings_allow_disabled_operations():
+    resource = note_resource(
+        aggregatable=[], insert_arguments={}, update_arguments={}
+    )
+    assert resource.insert_argument_names == ()
+    assert resource.update_argument_names == ()
 
 
 def note_resource(name="json_notes", **kwargs):

@@ -38,6 +38,8 @@ import types
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from inspect import Parameter, signature
+from keyword import iskeyword
 from typing import Any, Protocol, cast
 
 import strawberry
@@ -108,6 +110,9 @@ class WriteBackend(Protocol):
     demo wraps the bare ORM, a real consumer wraps its CRUD machinery.
     ``delete`` returns the deleted instance (or ``None``) so the Hasura
     ``delete_<res>_by_pk`` response can resolve the removed row.
+
+    Opt-in root arguments require matching backend keywords; their meaning
+    belongs to the backend (see ``CONTRACT.md``).
     """
 
     def create(self, info: strawberry.Info, data: dict[str, Any]) -> Any: ...
@@ -192,6 +197,8 @@ class HasuraResource:
     ``aggregate`` payload (the native ``<Model>Aggregate`` on the model path,
     the count-only ``<Node>Aggregate`` on the row-source path). Groupable
     resources expose both ``groups_root`` and the exact ``groups_count_root``.
+    ``insert_argument_names`` and ``update_argument_names`` are tuples of
+    declared root argument names.
     """
 
     query: type
@@ -230,6 +237,9 @@ class HasuraResource:
     )
     # Appended for positional-constructor compatibility with <= 0.5.x.
     groups_count_root: str | None = None
+    # Appended for positional-constructor compatibility with <= 0.11.x.
+    insert_argument_names: tuple[str, ...] = ()
+    update_argument_names: tuple[str, ...] = ()
 
 
 def _column_python_type(field: Any, *, for_input: bool = False) -> Any:
@@ -562,6 +572,27 @@ def _child_relation(model: type[Model], relation: str) -> Any:
     return reverse
 
 
+def _mutation_with_arguments(
+    resolver: Callable[..., Any], *, name: str, arguments: Mapping[str, Any]
+) -> Any:
+    """Compose Strawberry's optional arguments with a runtime resolver."""
+    sig = signature(resolver)
+    parameters = [
+        p for p in sig.parameters.values() if p.kind != Parameter.VAR_KEYWORD
+    ]
+    parameters += [
+        Parameter(
+            argument_name,
+            kind=Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation=argument_type | None,
+        )
+        for argument_name, argument_type in arguments.items()
+    ]
+    cast(Any, resolver).__signature__ = sig.replace(parameters=parameters)
+    return strawberry.mutation(resolver=django_resolver(resolver), name=name)
+
+
 def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per facet
     node: type,
     *,
@@ -594,6 +625,8 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     write_backend: WriteBackend,
     id_decode: Callable[[Any], Any] | None = None,
     id_column: str = "pk",
+    insert_arguments: Mapping[str, Any] | None = None,
+    update_arguments: Mapping[str, Any] | None = None,
 ) -> HasuraResource:
     """Assemble the full Hasura surface for ``model`` in one call.
 
@@ -642,6 +675,8 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     ``insert=True``. ``insert`` / ``update`` / ``delete``
     mirror Hasura table mutation operation permissions: disabling one removes
     its root and the input types used only by that operation.
+    ``insert_arguments`` / ``update_arguments`` map root argument names to
+    input types for backend-owned keywords (see ``CONTRACT.md``).
     ``field_id_decode`` marks non-``id`` scalar fields whose Hasura operands
     are public ids and must be decoded before the Django lookup, e.g. a
     foreign-key column exposed as a public id.
@@ -660,6 +695,51 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     or use ``hasura_config()`` when snake_case is required on those fields.
     """
     res = name or model.__name__.lower()
+    insert_arguments = dict(insert_arguments or {})
+    update_arguments = dict(update_arguments or {})
+    for operation, method, enabled, arguments in (
+        ("insert", "create", insert, insert_arguments),
+        ("update", "update", update, update_arguments),
+    ):
+        if not arguments:
+            continue
+        if not enabled:
+            raise TypeError(f"{operation}_arguments requires {operation}=True")
+        for arg_name, argument_type in arguments.items():
+            if (
+                not isinstance(arg_name, str)
+                or not arg_name.isidentifier()
+                or iskeyword(arg_name)
+                or arg_name
+                in {"object", "pk_columns", "_set", "self", "root", "info"}
+            ):
+                raise TypeError(
+                    f"{operation}_arguments name {arg_name!r} is an "
+                    "invalid or reserved Python parameter name"
+                )
+            if isinstance(argument_type, str) or argument_type is None:
+                raise TypeError(
+                    f"{operation}_arguments type for {arg_name!r} "
+                    "must be an input type, not a string annotation or None"
+                )
+        try:
+            params = signature(
+                getattr(write_backend, method)
+            ).parameters.values()
+        except TypeError, ValueError:
+            pass
+        else:
+            if not any(p.kind == Parameter.VAR_KEYWORD for p in params):
+                accepted = {
+                    p.name
+                    for p in params
+                    if p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD)
+                }
+                if missing := sorted(arguments.keys() - accepted):
+                    raise TypeError(
+                        f"write_backend.{method} does not accept "
+                        f"{operation}_arguments {missing!r}"
+                    )
     capped_limit(None, max_rows)
     capped_limit(None, max_groups)
     active_json_paths = dict(json_paths or {})
@@ -1019,6 +1099,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             self: Any,
             info: strawberry.Info,
             object: Any,
+            **extra: Any,
         ) -> Any:
             data = input_to_dict(object)
             # Hasura semantics: an explicit ``<relation>: null`` envelope
@@ -1027,7 +1108,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             for relation in nested_arr_input_types:
                 if data.get(relation) is None:
                     data.pop(relation, None)
-            return write_backend.create(info, data)
+            return write_backend.create(info, data, **extra)
 
         resolve_insert.__annotations__ = {
             "self": Any,
@@ -1035,9 +1116,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             "object": insert_input,
             "return": node,
         }
-        mutation_fields[insert_one_root] = strawberry.mutation(
-            resolver=django_resolver(resolve_insert),
+        mutation_fields[insert_one_root] = _mutation_with_arguments(
+            resolve_insert,
             name=insert_one_root,
+            arguments=insert_arguments,
         )
     if "update" in operations:
         assert pk_columns_input is not None
@@ -1045,12 +1127,14 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         assert update_by_pk_root is not None
 
         def resolve_update(
-            self: Any, info: strawberry.Info, pk_columns: Any, _set: Any
+            self: Any,
+            info: strawberry.Info,
+            pk_columns: Any,
+            _set: Any,
+            **extra: Any,
         ) -> Any:
             return write_backend.update(
-                info,
-                pk_columns.id,
-                input_to_dict(_set),
+                info, pk_columns.id, input_to_dict(_set), **extra
             )
 
         resolve_update.__annotations__ = {
@@ -1060,9 +1144,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             "_set": set_input,
             "return": node,
         }
-        mutation_fields[update_by_pk_root] = strawberry.mutation(
-            resolver=django_resolver(resolve_update),
+        mutation_fields[update_by_pk_root] = _mutation_with_arguments(
+            resolve_update,
             name=update_by_pk_root,
+            arguments=update_arguments,
         )
     if "delete" in operations:
         assert delete_by_pk_root is not None
@@ -1142,4 +1227,6 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         nested_inserts=nested_specs,
         nested_input_types=nested_input_types,
         nested_arr_input_types=nested_arr_input_types,
+        insert_argument_names=tuple(insert_arguments),
+        update_argument_names=tuple(update_arguments),
     )

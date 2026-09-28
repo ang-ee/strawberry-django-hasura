@@ -68,4 +68,9 @@ def test_model_resource_exposes_builder_decided_write_facts():
 def test_group_count_metadata_is_appended_for_positional_compatibility():
     names = [field.name for field in fields(HasuraResource)]
 
-    assert names[-1] == "groups_count_root"
+    # 0.12 appends argument metadata after the 0.11 positional prefix.
+    assert names[30:] == [
+        "groups_count_root",
+        "insert_argument_names",
+        "update_argument_names",
+    ]

@@ -5,6 +5,17 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] — 2026-09-28
+
+### Added
+
+- `hasura_resource(insert_arguments=..., update_arguments=...)` declares
+  optional root arguments forwarded to the caller's write backend. The
+  builder validates names, types, enabled operations, and backend keyword
+  support, and exposes the declared names on `HasuraResource`. Argument
+  semantics remain caller-owned; undeclared resources and delete are
+  unchanged. See `CONTRACT.md` for the wire contract.
+
 ## [0.11.0] — 2026-09-11
 
 ### Added

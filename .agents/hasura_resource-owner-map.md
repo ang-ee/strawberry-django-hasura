@@ -14,6 +14,7 @@ a Django model by **composing** the existing primitives (no fork, no reshape).
 | the free `<Model>Aggregate` + container | existing `build_aggregate_type` / `make_aggregate_resolver` / `make_aggregate_container` | composed unchanged; folded-in `_pin_snake_wire_names` pins its field names |
 | row scoping (REBAC) on reads | caller's `get_queryset(info)` | reads run on it |
 | authorized writes + relation coercion | caller's `write_backend.create/update/delete` | writes dispatch to it |
+| declared insert/update root argument meaning | caller's write backend | the builder declares optional parameters, pins their wire names, and forwards keyword values unchanged |
 | sqid ⇄ pk decode for the `id` arg | caller's `id_decode` | passed to `where_to_q`; applied at by-pk / pk_columns |
 | snake_case wire names (no schema-wide converter) | the builder | pins `graphql_name` on roots, args, generated input fields, and aggregate-type fields |
 

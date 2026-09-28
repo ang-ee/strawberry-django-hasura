@@ -41,6 +41,53 @@ the optional `aggregate_name` override; an override must be unique in a schema.
 - `update_notes_by_pk(pk_columns: notes_pk_columns_input!, _set: notes_set_input!): Note!`
 - `delete_notes_by_pk(id: String!): Note`
 
+### Caller-declared root arguments (opt-in)
+
+`hasura_resource(..., insert_arguments=None, update_arguments=None)` accepts
+two optional `Mapping[str, Any]` declarations from argument name to
+Strawberry-compatible input type. For example,
+`insert_arguments={"client_creation_key": str}` and
+`update_arguments={"expected_revision": int}` emit:
+
+```graphql
+insert_notes_one(object: notes_insert_input!, client_creation_key: String = null): Note!
+update_notes_by_pk(pk_columns: notes_pk_columns_input!, _set: notes_set_input!, expected_revision: Int = null): Note!
+delete_notes_by_pk(id: String!): Note
+```
+
+- String annotations and `None` are rejected as declared types at construction; pass concrete input types.
+- Every declared argument is nullable with default `null`. Wire names are
+  pinned verbatim, including snake_case names on a camelCase schema.
+- Values reach `write_backend.create(info, data, **extra)` or
+  `write_backend.update(info, pk, data, **extra)` as named keywords after
+  Strawberry coercion. Every declared keyword is present; omitted arguments
+  and explicit `null` arrive as `None`. Extra input objects and custom scalar
+  values pass through unchanged.
+- Arguments belong only to their declared root and never become fields of
+  `object`, `_set`, or nested insert inputs. Nested insert reduction and the
+  existing write boundary are unchanged.
+- The library attaches no meaning to these values. Revision preconditions,
+  creation-key semantics, errors, authorization, and persistence belong to
+  the caller's backend. An opting-in backend must accept its declared
+  keywords; existing `WriteBackend` protocol signatures remain compatible.
+- Names must be Python identifiers, must not be Python keywords, and must
+  not be `object`, `pk_columns`, `_set`, `self`, `root`, or `info`. Invalid
+  or reserved names raise `TypeError` at resource construction, as does a
+  nonempty declaration for a disabled operation. The delete root gets no knob.
+- When the backend method's signature is inspectable, it must accept each
+  declared name as a keyword-only or positional-or-keyword parameter, or
+  accept `**kwargs`; otherwise resource construction raises `TypeError`
+  naming the unsupported arguments. Callables whose signatures raise
+  `TypeError` or `ValueError` during inspection are allowed through.
+- Declarations are copied at construction. The built resource exposes
+  `insert_argument_names: tuple[str, ...]` and
+  `update_argument_names: tuple[str, ...]` in declaration order; both default
+  to `()`. These fields are appended to `HasuraResource` for positional
+  constructor compatibility.
+- `None` and empty mappings leave the existing SDL and backend calls
+  unchanged. Authored client mutations can supply the extra arguments; this
+  option does not change the stock provider's generated documents.
+
 ## Filter — `notes_bool_exp`
 
 Per filterable field a `<scalar>_comparison_exp` object, plus boolean

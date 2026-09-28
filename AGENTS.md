@@ -40,9 +40,10 @@ primitives above — it owns only *composition + naming*. It derives the
 comparison/order scalar of each column from the **Django field** and the
 `insert`/`_set` writable columns from the model's editable, non-pk, non-auto
 fields; row scoping (`get_queryset`), authorized writes (`write_backend`, a
-`Protocol`), and the sqid⇄pk boundary (`id_decode`) stay caller-supplied (no
-rebac/Angee imports leak in). Crucially it **pins the snake_case wire names
-itself** — per root field, argument, generated input field, and
+`Protocol`), root-argument semantics (`insert_arguments` / `update_arguments`
+handled by the backend), and the sqid⇄pk boundary (`id_decode`) stay
+caller-supplied (no rebac/Angee imports leak in). Crucially it **pins the
+snake_case wire names itself** — per root field, argument, generated input field, and
 `<Model>Aggregate` field name — so the resource is correct on a stock
 *camelCase* consuming schema (e.g. Angee) with no schema-wide `hasura_config()`.
 The generated `<res>_bool_exp` references itself (`_and`/`_or`/`_not`), so the

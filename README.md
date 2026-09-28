@@ -147,6 +147,35 @@ node types belong to the consumer: explicitly name snake_case output fields,
 as above, or use `hasura_config()` on a schema dedicated to this dialect. The
 builder never changes a shared output type's names.
 
+### Caller-declared insert and update arguments
+
+Declare insert and update root arguments with `insert_arguments` and
+`update_arguments`.
+
+```python
+resource = hasura_resource(
+    NoteType,
+    model=Note,
+    name="notes",
+    filterable=["id", "title"],
+    sortable=["title"],
+    aggregatable=[],
+    get_queryset=get_queryset,
+    write_backend=backend,
+    insert_arguments={"client_creation_key": str},
+    update_arguments={"expected_revision": int},
+)
+```
+
+The backend accepts these keywords and owns their meaning; see the
+[wire contract](./CONTRACT.md#caller-declared-root-arguments-opt-in) for the
+complete contract.
+
+```python
+def create(self, info, data, *, client_creation_key=None): ...
+def update(self, info, pk, data, *, expected_revision=None): ...
+```
+
 ### Execution and resource limits
 
 Generated ORM roots support synchronous and asynchronous Strawberry execution

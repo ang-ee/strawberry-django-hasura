@@ -22,6 +22,56 @@ from strawberry_django_hasura import (
     hasura_run_query_resource,
 )
 from tests.models import AuthorModel, BookModel, ChapterModel
+from tests.test_write_boundaries import ArgumentWriteBackend, _resource
+
+
+def test_declared_mutation_arguments_are_optional_root_only_and_snake_case():
+    baseline = _resource(ArgumentWriteBackend(), delete=True)
+    baseline_schema = strawberry.Schema(
+        query=baseline.query,
+        mutation=baseline.mutation,
+        types=baseline.types,
+    )
+    baseline_sdl = baseline_schema.as_str()
+    resource = _resource(
+        ArgumentWriteBackend(),
+        delete=True,
+        insert_arguments={"client_creation_key": str},
+        update_arguments={"expected_revision": int},
+    )
+    sdl = strawberry.Schema(
+        query=resource.query,
+        mutation=resource.mutation,
+        types=resource.types,
+    ).as_str()
+    insert_marker = (
+        "insert_write_boundaries_one("
+        "object: write_boundaries_insert_input!, "
+        "client_creation_key: String = null): WriteBoundaryNode!"
+    )
+    update_marker = (
+        "update_write_boundaries_by_pk("
+        "pk_columns: write_boundaries_pk_columns_input!, "
+        "_set: write_boundaries_set_input!, "
+        "expected_revision: Int = null): WriteBoundaryNode!"
+    )
+    assert insert_marker in sdl
+    assert update_marker in sdl
+    assert (
+        "delete_write_boundaries_by_pk(id: String!): WriteBoundaryNode" in sdl
+    )
+    assert sdl.count("client_creation_key") == 1
+    assert sdl.count("expected_revision") == 1
+    assert "clientCreationKey" not in sdl
+    assert "expectedRevision" not in sdl
+
+    assert baseline_schema.as_str() == baseline_sdl
+    assert (
+        sdl.replace(", client_creation_key: String = null", "").replace(
+            ", expected_revision: Int = null", ""
+        )
+        == baseline_sdl
+    )
 
 
 def test_temporal_comparisons_and_resource_aggregate_prefix():

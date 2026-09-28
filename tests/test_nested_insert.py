@@ -512,3 +512,55 @@ def test_child_column_named_id_collides_with_upsert_key():
             _types.ModuleType("tests._x"),
             with_public_id=True,
         )
+
+
+def test_nested_insert_with_declared_root_argument(db):
+    class CapturingBackend(BookWithChaptersWriteBackend):
+        def __init__(self) -> None:
+            self.received: list[tuple[dict[str, Any], str | None]] = []
+
+        def create(
+            self,
+            info: strawberry.Info,
+            data: dict[str, Any],
+            *,
+            client_creation_key: str | None = None,
+        ) -> BookModel:
+            self.received.append((data, client_creation_key))
+            return super().create(info, data)
+
+    backend = CapturingBackend()
+    author = AuthorModel.objects.create(name="Ada")
+    resource = _book_with_chapters_resource(
+        write_backend=backend,
+        insert_arguments={"client_creation_key": str},
+    )
+    schema = strawberry.Schema(
+        query=resource.query,
+        mutation=resource.mutation,
+        types=[Chapter, *resource.types],
+    )
+    payload = {
+        "title": "Compiler",
+        "author": encode_author(author.pk),
+        "chapters": {"data": [{"title": "Parsing", "position": 1}]},
+    }
+    result = schema.execute_sync(
+        """mutation($object: books_insert_input!) {
+          insert_books_one(
+            object: $object, client_creation_key: "attempt-42"
+          ) { title chapters {title position} }
+        }""",
+        variable_values={"object": payload},
+    )
+
+    assert result.errors is None, result.errors
+    assert result.data == {
+        "insert_books_one": {
+            "title": "Compiler",
+            "chapters": [{"title": "Parsing", "position": 1}],
+        }
+    }
+    assert backend.received == [(payload, "attempt-42")]
+    book = BookModel.objects.get(title="Compiler")
+    assert book.chapters.get().title == "Parsing"

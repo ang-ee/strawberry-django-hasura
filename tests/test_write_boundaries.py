@@ -8,9 +8,11 @@ import pytest
 import strawberry
 import strawberry_django
 from django.core.files.uploadedfile import SimpleUploadedFile
+from strawberry.scalars import JSON
 
 from strawberry_django_hasura import hasura_resource
 from tests.models import WriteBoundaryModel
+from tests.test_async import _run_async
 
 
 @strawberry_django.type(WriteBoundaryModel)
@@ -190,3 +192,215 @@ def test_omitted_database_default_is_applied_by_django(db):
     }
     assert backend.calls == [{"title": "hello"}]
     assert WriteBoundaryModel.objects.get().revision == 7
+
+
+class ArgumentWriteBackend(RecordingWriteBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.received: list[tuple[Any, ...]] = []
+
+    def create(
+        self, info: strawberry.Info, data: dict[str, Any], **extra: Any
+    ) -> WriteBoundaryModel:
+        self.received.append(("create", info.context, data, extra))
+        return WriteBoundaryModel(title=data["title"])
+
+    def update(
+        self,
+        info: strawberry.Info,
+        pk: str,
+        data: dict[str, Any],
+        **extra: Any,
+    ) -> WriteBoundaryModel:
+        self.received.append(("update", info.context, pk, data, extra))
+        return WriteBoundaryModel(title=data["title"])
+
+
+_ARGUMENT_MUTATION = """mutation($key: String, $revision: Int) {
+  insert_write_boundaries_one(
+    object: {title: "new"}, client_creation_key: $key
+  ) { title }
+  update_write_boundaries_by_pk(
+    pk_columns: {id: "opaque-42"}, _set: {title: "changed"},
+    expected_revision: $revision
+  ) { title }
+}"""
+_OMITTED_ARGUMENT_MUTATION = """mutation {
+  insert_write_boundaries_one(object: {title: "new"}) { title }
+  update_write_boundaries_by_pk(
+    pk_columns: {id: "opaque-42"}, _set: {title: "changed"}
+  ) { title }
+}"""
+
+
+@pytest.mark.parametrize("execute_async", [False, True])
+@pytest.mark.parametrize(
+    ("document", "arguments", "expected_insert", "expected_update"),
+    [
+        (
+            _ARGUMENT_MUTATION,
+            {"key": "attempt-42", "revision": 0},
+            "attempt-42",
+            0,
+        ),
+        (_ARGUMENT_MUTATION, {"key": None, "revision": None}, None, None),
+        (_ARGUMENT_MUTATION, {}, None, None),
+        (_OMITTED_ARGUMENT_MUTATION, {}, None, None),
+    ],
+)
+def test_root_arguments_reach_backend_as_keywords(
+    execute_async, document, arguments, expected_insert, expected_update
+):
+    backend = ArgumentWriteBackend()
+    insert_arguments = {"client_creation_key": str}
+    update_arguments = {"expected_revision": int}
+    resource = _resource(
+        backend,
+        insert_arguments=insert_arguments,
+        update_arguments=update_arguments,
+    )
+    # Declarations are copied at construction, just like other resource knobs.
+    insert_arguments.clear()
+    update_arguments.clear()
+    schema = strawberry.Schema(
+        query=resource.query,
+        mutation=resource.mutation,
+        types=resource.types,
+    )
+    context = object()
+    execution_options = {
+        "variable_values": arguments,
+        "context_value": context,
+    }
+    result = (
+        _run_async(schema.execute(document, **execution_options))
+        if execute_async
+        else schema.execute_sync(document, **execution_options)
+    )
+
+    assert result.errors is None, result.errors
+    assert result.data == {
+        "insert_write_boundaries_one": {"title": "new"},
+        "update_write_boundaries_by_pk": {"title": "changed"},
+    }
+    assert backend.received == [
+        (
+            "create",
+            context,
+            {"title": "new"},
+            {"client_creation_key": expected_insert},
+        ),
+        (
+            "update",
+            context,
+            "opaque-42",
+            {"title": "changed"},
+            {"expected_revision": expected_update},
+        ),
+    ]
+    assert resource.insert_argument_names == ("client_creation_key",)
+    assert resource.update_argument_names == ("expected_revision",)
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        {},
+        {
+            "insert_arguments": None,
+            "update_arguments": None,
+        },
+        {"insert_arguments": {}, "update_arguments": {}},
+    ],
+)
+def test_no_declaration_keeps_fixed_backend_signatures(declarations):
+    backend = RecordingWriteBackend()
+    resource = _resource(backend, **declarations)
+    schema = strawberry.Schema(
+        query=resource.query,
+        mutation=resource.mutation,
+        types=resource.types,
+    )
+    result = schema.execute_sync("""mutation {
+      insert_write_boundaries_one(object: {title: "new"}) { title }
+      update_write_boundaries_by_pk(
+        pk_columns: {id: "opaque-42"}, _set: {title: "changed"}
+      ) { title }
+    }""")
+
+    assert result.errors is None, result.errors
+    assert backend.calls == [{"title": "new"}, {"title": "changed"}]
+    assert resource.insert_argument_names == ()
+    assert resource.update_argument_names == ()
+
+
+def test_argument_input_types_use_strawberry_coercion_and_pass_through():
+    @strawberry.input
+    class WriteContext:
+        reason: str
+
+    backend = ArgumentWriteBackend()
+    resource = _resource(
+        backend,
+        insert_arguments={
+            "write_context": WriteContext,
+            "labels": list[str],
+            "retry": bool | None,
+            "metadata": JSON,
+        },
+    )
+    schema = strawberry.Schema(
+        query=resource.query, mutation=resource.mutation
+    )
+    result = schema.execute_sync("""mutation {
+      insert_write_boundaries_one(
+        object: {title: "new"}, write_context: {reason: "test"},
+        labels: ["first", "second"], retry: false, metadata: {attempt: 1}
+      ) { title }
+    }""")
+
+    assert result.errors is None, result.errors
+    assert backend.received[0][-1] == {
+        "write_context": WriteContext(reason="test"),
+        "labels": ["first", "second"],
+        "retry": False,
+        "metadata": {"attempt": 1},
+    }
+    assert resource.insert_argument_names == (
+        "write_context",
+        "labels",
+        "retry",
+        "metadata",
+    )
+
+
+@pytest.mark.parametrize("operation", ["insert", "update"])
+@pytest.mark.parametrize(
+    "name", ["self", "root", "info", "class", "bad-name", "9name", "", 42]
+)
+def test_invalid_or_resolver_reserved_argument_names_are_rejected(
+    operation, name
+):
+    with pytest.raises(
+        TypeError, match="invalid or reserved Python parameter name"
+    ):
+        _resource(
+            ArgumentWriteBackend(), **{f"{operation}_arguments": {name: str}}
+        )
+
+
+def test_declared_argument_type_is_validated_before_backend():
+    backend = ArgumentWriteBackend()
+    resource = _resource(backend, update_arguments={"expected_revision": int})
+    schema = strawberry.Schema(
+        query=resource.query, mutation=resource.mutation
+    )
+    result = schema.execute_sync("""mutation {
+      update_write_boundaries_by_pk(
+        pk_columns: {id: "opaque-42"}, _set: {title: "changed"},
+        expected_revision: "invalid"
+      ) { title }
+    }""")
+
+    assert result.errors
+    assert backend.received == []
