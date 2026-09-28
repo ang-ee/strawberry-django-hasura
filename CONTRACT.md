@@ -306,6 +306,10 @@ Strawberry Django `Upload` mapping; transport configuration, authorization,
 and file validation remain consumer concerns. Columns with `db_default` can
 be omitted from inserts so Django applies the database default.
 
+Where the Strawberry build supports input extensions, their fields are
+forwarded in create/update and nested insert envelopes like declared fields,
+using Python field names and omitting `UNSET` values.
+
 ORM roots compose Strawberry Django's resolver and optimizer facilities for
 sync and async execution. Sources supplied to the builder define root row
 scope; the builder does not apply a second node-level `get_queryset` policy

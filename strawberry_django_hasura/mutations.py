@@ -21,7 +21,6 @@ that happens to be a dataclass — passes through verbatim.
 
 from __future__ import annotations
 
-import dataclasses
 from typing import Any
 
 from strawberry import UNSET
@@ -31,10 +30,15 @@ from strawberry.types import get_object_definition
 def input_to_dict(value: Any) -> dict[str, Any]:
     """Return the set (non-UNSET) fields of a strawberry input as kwargs."""
     out: dict[str, Any] = {}
-    for f in dataclasses.fields(value):
-        v = getattr(value, f.name, UNSET)
-        if v is not UNSET:
-            out[f.name] = _reduce(v)
+    definitions = (
+        value.__strawberry_definition__,
+        *getattr(type(value), "strawberry_input_extension_definitions", ()),
+    )
+    for definition in definitions:
+        for field in definition.fields:
+            v = getattr(value, field.python_name, UNSET)
+            if v is not UNSET:
+                out[field.python_name] = _reduce(v)
     return out
 
 

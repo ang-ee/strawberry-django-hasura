@@ -16,6 +16,11 @@ and this project adheres to
   semantics remain caller-owned; undeclared resources and delete are
   unchanged. See `CONTRACT.md` for the wire contract.
 
+### Fixed
+
+- Mutation envelopes retain input-extension fields on Strawberry builds that
+  support them, including nested inputs; `UNSET` values remain omitted.
+
 ## [0.11.0] — 2026-09-11
 
 ### Added
