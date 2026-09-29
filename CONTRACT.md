@@ -178,8 +178,16 @@ lookup in its own `_LOOKUPS`.
 
 - `input notes_order_by { <field>: order_by }` — a per-field input of the
   `order_by` enum (a client may pass `[{ word_count: desc }, { title: asc }]`).
-- `enum order_by { asc desc }`
-- Maps to Django `.order_by()` (`desc` → a `-` prefix).
+- `enum order_by { asc asc_nulls_first asc_nulls_last desc
+  desc_nulls_first desc_nulls_last }`. `asc` and `asc_nulls_last` put nulls
+  last; `desc` and `desc_nulls_first` put nulls first. The other two members
+  request the opposite placement. The stock provider continues to send
+  `asc` / `desc`.
+- Maps to Django `.order_by()` using `F(column).asc()` / `.desc()` with
+  explicit `nulls_first` or `nulls_last`, so placement is the same on SQLite
+  and Postgres. Clause order follows the list and the fields within each input.
+  Public `order_clauses()` returns Django `OrderBy` expressions, not strings;
+  each selected column is available as `clause.expression.name` (`F.name`).
 - The public `id` ordering column maps to `id_column`, including custom primary
   keys. Unknown paths and to-many ordering paths fail at resource construction.
 - `hasura_resource(sortable=["sender_name"],
@@ -204,16 +212,17 @@ lookup in its own `_LOOKUPS`.
   annotation the source already installed, fails before execution. Plain
   string aliases remain the compatibility form for annotations already
   installed by `get_queryset`.
-- `get_queryset` owns annotation expressions, authorization, NULL behavior
-  and one-row-per-object cardinality; a lazy alias expression must preserve
+- `get_queryset` owns annotation expressions, authorization, and
+  one-row-per-object cardinality; a lazy alias expression must preserve
   that scoped source and its authorization boundary. `apply_ordering` only
-  translates names and never adds SQL — lazy preparation is a separate step
+  translates names and placement; lazy preparation is a separate step
   composed before it. Aliases do not add filters, aggregate fields, grouped
   dimensions or output fields. Aggregate nodes retain their existing
   source-order behavior.
-- An explicit ORM `order_by` appends the model primary key ascending when it
-  is not already selected, including after annotation aliases. This makes
-  tied values stable across offset pages; an explicit PK direction is kept.
+- An explicit ORM `order_by` appends the model primary key ascending with
+  nulls last when it is not already selected, including after annotation
+  aliases. This makes tied values stable across offset pages; an explicit PK
+  direction is kept.
 
 ## Paging
 
@@ -279,8 +288,8 @@ evaluates the `<res>_bool_exp` / `order_by` / paging in Python via
 transport-backed source pushes the predicate to its owner. The same `_bool_exp`
 operator set and fail-fast-on-unmapped-operator stance as the model path apply.
 
-In-memory NULL ordering follows the model path's default SQLite backend: NULLs
-sort **first on `asc`, last on `desc`**; a positive `_like`/`_ilike` does **not**
+In-memory NULL ordering follows the same Hasura enum semantics as the ORM:
+NULLs sort **last on `asc`, first on `desc`**; a positive `_like`/`_ilike` does **not**
 match a NULL row (the negated family does, like Django's `~Q`). An explicit
 `null` comparison operand raises in both paths — use `_is_null`. A null
 `where` or null column comparison object still represents an absent filter.

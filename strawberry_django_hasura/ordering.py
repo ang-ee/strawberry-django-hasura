@@ -8,8 +8,8 @@ the vocabulary. Explicit sortable aliases map wire names to queryset
 annotations — either installed by the source (a plain string) or prepared
 lazily by :func:`prepare_sort_aliases` from a :class:`SortAlias` expression
 provider, only when the alias is ordered. Other fields retain their Django
-column/path names. ``desc`` adds a ``-`` prefix, and the primary key makes
-explicit ordering total.
+column/path names. Django ordering expressions place nulls explicitly, and
+the primary key makes explicit ordering total.
 """
 
 from __future__ import annotations
@@ -19,12 +19,13 @@ import enum
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import strawberry
 from django.core.exceptions import FieldDoesNotExist
-from django.db.models import Model, QuerySet
+from django.db.models import F, Model, QuerySet
 from django.db.models.expressions import Combinable
+from django.db.models.expressions import OrderBy as DjangoOrderBy
 from strawberry import UNSET
 
 SortAliasExpression = Callable[[strawberry.Info, QuerySet[Any]], Combinable]
@@ -39,12 +40,14 @@ makes the sort key depend on the request's ``where``.
 
 @strawberry.enum(name="order_by")
 class OrderBy(enum.Enum):
-    """Hasura sort direction (``order_by`` enum). Hasura also defines
-    nulls-aware members (``asc_nulls_first`` …); ``asc`` / ``desc`` are the
-    pair the stock ``@refinedev/hasura`` provider emits."""
+    """Hasura sort direction and explicit null placement."""
 
     asc = "asc"
+    asc_nulls_first = "asc_nulls_first"
+    asc_nulls_last = "asc_nulls_last"
     desc = "desc"
+    desc_nulls_first = "desc_nulls_first"
+    desc_nulls_last = "desc_nulls_last"
 
 
 @dataclass(frozen=True)
@@ -185,8 +188,8 @@ def validate_sortable(
     return aliases
 
 
-def _selected_columns(clauses: list[str]) -> set[str]:
-    return {clause.removeprefix("-") for clause in clauses}
+def _selected_columns(clauses: list[DjangoOrderBy]) -> set[str]:
+    return {cast(Any, clause.expression).name for clause in clauses}
 
 
 def prepare_sort_aliases(
@@ -220,11 +223,12 @@ def order_clauses(
     *,
     id_column: str = "id",
     sortable_aliases: Mapping[str, str | SortAlias] | None = None,
-) -> list[str]:
+) -> list[DjangoOrderBy]:
     """Flatten a Hasura ``order_by`` list into Django ``.order_by()`` clauses.
 
     Iterates inputs (then fields within each) in declaration order so the
-    emitted clause order is deterministic and matches the wire order.
+    emitted clause order is deterministic and matches the wire order. Each
+    clause is an ``OrderBy(F(column), ...)`` expression with null placement.
     """
     aliases = _sort_aliases(sortable_aliases)
     return _order_clauses(order_by, id_column=id_column, aliases=aliases)
@@ -235,20 +239,42 @@ def _order_clauses(
     *,
     id_column: str,
     aliases: Mapping[str, SortAlias],
-) -> list[str]:
+) -> list[DjangoOrderBy]:
     """Build clauses from aliases already normalized at the public boundary."""
 
-    clauses: list[str] = []
+    clauses: list[DjangoOrderBy] = []
     for entry in order_by or []:
         for f in dataclasses.fields(entry):
             direction = getattr(entry, f.name, UNSET)
             if direction is UNSET or direction is None:
                 continue
-            prefix = "-" if direction is OrderBy.desc else ""
             column = aliases[f.name].path if f.name in aliases else f.name
             if f.name == "id":
                 column = id_column
-            clauses.append(f"{prefix}{column}")
+            ascending = direction in (
+                OrderBy.asc,
+                OrderBy.asc_nulls_first,
+                OrderBy.asc_nulls_last,
+            )
+            nulls_first = direction in (
+                OrderBy.asc_nulls_first,
+                OrderBy.desc,
+                OrderBy.desc_nulls_first,
+            )
+            expression = F(column)
+            if ascending:
+                clause = (
+                    expression.asc(nulls_first=True)
+                    if nulls_first
+                    else expression.asc(nulls_last=True)
+                )
+            else:
+                clause = (
+                    expression.desc(nulls_first=True)
+                    if nulls_first
+                    else expression.desc(nulls_last=True)
+                )
+            clauses.append(clause)
     return clauses
 
 
@@ -285,5 +311,5 @@ def apply_ordering(
     if pk is not None and not selected.intersection(
         {"pk", pk.name, pk.attname}
     ):
-        clauses.append("pk")
+        clauses.append(F("pk").asc(nulls_last=True))
     return queryset.order_by(*clauses)

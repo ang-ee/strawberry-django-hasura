@@ -190,7 +190,18 @@ def test_sdl_shape() -> None:
         assert marker in sdl, marker
 
 
-def test_decimal_maps_to_decimal_and_nulls_sort_first_on_asc() -> None:
+@pytest.mark.parametrize(
+    "member,expected",
+    [
+        ("asc", ["b", "c", "a"]),
+        ("asc_nulls_first", ["a", "b", "c"]),
+        ("asc_nulls_last", ["b", "c", "a"]),
+        ("desc", ["a", "c", "b"]),
+        ("desc_nulls_first", ["a", "c", "b"]),
+        ("desc_nulls_last", ["c", "b", "a"]),
+    ],
+)
+def test_decimal_maps_to_decimal_and_null_order(member, expected) -> None:
     @dataclasses.dataclass
     class _Thing:
         id: str
@@ -206,6 +217,7 @@ def test_decimal_maps_to_decimal_and_nulls_sort_first_on_asc() -> None:
     rows = [
         _Thing(id="a", amount=decimal.Decimal("2.5"), note=None),
         _Thing(id="b", amount=decimal.Decimal("1.5"), note="x"),
+        _Thing(id="c", amount=decimal.Decimal("3.5"), note="y"),
     ]
     resource = hasura_run_query_resource(
         Thing,
@@ -221,10 +233,11 @@ def test_decimal_maps_to_decimal_and_nulls_sort_first_on_asc() -> None:
     # which would round the operand through a double; not String).
     assert "Decimal_comparison_exp" in str(schema)
     assert "Float_comparison_exp" not in str(schema)
-    # NULL sorts first on asc (matches the model path's SQLite default).
-    result = schema.execute_sync("{ things(order_by: [{note: asc}]) { id } }")
+    result = schema.execute_sync(
+        "{ things(order_by: [{note: " + member + "}]) { id } }"
+    )
     assert result.errors is None, result.errors
-    assert [row["id"] for row in result.data["things"]] == ["a", "b"]
+    assert [row["id"] for row in result.data["things"]] == expected
 
 
 def test_empty_not_matches_all_and_null_operand_is_rejected() -> None:

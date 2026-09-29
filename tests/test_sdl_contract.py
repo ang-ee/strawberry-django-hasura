@@ -134,6 +134,10 @@ CRUD_MARKERS = [
     "_or: [notes_bool_exp!]",
     "_not: notes_bool_exp",
     "enum order_by {",
+    "asc_nulls_first",
+    "asc_nulls_last",
+    "desc_nulls_first",
+    "desc_nulls_last",
     "word_count",  # snake_case verbatim on the wire (Hasura convention)
 ]
 
@@ -190,6 +194,19 @@ GROUPING_MARKERS = [
 @pytest.mark.parametrize("marker", CRUD_MARKERS)
 def test_crud_marker_present(schema, marker):
     assert marker in schema.as_str()
+
+
+def test_order_by_enum_has_exact_hasura_members(schema):
+    enum = re.search(r"enum order_by \{([^}]+)\}", schema.as_str())
+    assert enum is not None
+    assert enum[1].split() == [
+        "asc",
+        "asc_nulls_first",
+        "asc_nulls_last",
+        "desc",
+        "desc_nulls_first",
+        "desc_nulls_last",
+    ]
 
 
 @pytest.mark.parametrize("marker", AGGREGATE_MARKERS)

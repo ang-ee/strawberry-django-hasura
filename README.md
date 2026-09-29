@@ -147,6 +147,15 @@ node types belong to the consumer: explicitly name snake_case output fields,
 as above, or use `hasura_config()` on a schema dedicated to this dialect. The
 builder never changes a shared output type's names.
 
+For list ordering, the `order_by` enum supports `asc`, `asc_nulls_first`,
+`asc_nulls_last`, `desc`, `desc_nulls_first`, and `desc_nulls_last`. Hasura's
+`asc` places nulls last and `desc` places them first on every database; the
+stock provider still sends those two members. An authored query can select
+the other placements, for example
+`order_by: [{title: asc_nulls_first}]`. Direct callers of `order_clauses()`
+receive Django `OrderBy` expressions with explicit null placement. Read each
+selected column from `clause.expression.name`.
+
 See the [input-extension forwarding contract](./CONTRACT.md#write-and-execution-boundaries)
 for values added to converted mutation inputs.
 

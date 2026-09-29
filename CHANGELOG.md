@@ -5,6 +5,24 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] — 2026-09-29
+
+### Added
+
+- The Hasura `order_by` enum now includes `asc_nulls_first`,
+  `asc_nulls_last`, `desc_nulls_first`, and `desc_nulls_last` for model and
+  in-memory resources.
+
+### Changed
+
+- `asc` now places nulls last and `desc` places them first on every database,
+  including SQLite and Postgres. All ordering clauses use Django expressions
+  with explicit placement, including aliases and the primary-key tie breaker.
+- **Breaking for direct callers:** `order_clauses()` returns Django `OrderBy`
+  expressions instead of `list[str]`. The selected column is available as
+  `clause.expression.name`; the expression also exposes `descending`,
+  `nulls_first`, and `nulls_last`.
+
 ## [0.12.1] — 2026-09-28
 
 ### Fixed

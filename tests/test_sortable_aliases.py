@@ -100,10 +100,12 @@ def test_native_annotation_order_scope_and_page_ties(
     assert len(queries) == 3  # One list, one page, native free aggregate.
     page_sql = queries[1]["sql"]
     assert "LOWER(COALESCE(" in page_sql
+    nulls = "LAST" if direction == "asc" else "FIRST"
     assert re.search(
         r"ORDER BY .+ "
         + direction.upper()
-        + r', "tests_readboundarymodel"\."code" ASC',
+        + rf' NULLS {nulls}, "tests_readboundarymodel"\.'
+        + r'"code" ASC NULLS LAST',
         page_sql,
     )
     assert "LIMIT 2 OFFSET 1" in page_sql
@@ -259,7 +261,13 @@ def test_native_pk_sort_remains_the_selected_tiebreaker(rows):
         [resource.order_by_type(score=OrderBy.asc, id=OrderBy.desc)],
         id_column="code",
     )
-    assert ordered.query.order_by == ("-code", "score")
+    assert [
+        (part.expression.name, part.descending)
+        for part in ordered.query.order_by
+    ] == [
+        ("code", True),
+        ("score", False),
+    ]
     assert list(ordered.values_list("pk", flat=True)) == ["n", "c", "b", "a"]
     assert apply_ordering(
         queryset.order_by("-score"), None

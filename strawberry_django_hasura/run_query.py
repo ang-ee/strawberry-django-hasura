@@ -30,9 +30,10 @@ import dataclasses
 import uuid
 from collections.abc import Callable, Iterable, Sequence
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import strawberry
+from django.db.models import F
 from strawberry import UNSET
 from strawberry.types import get_object_definition
 from strawberry.types.enum import StrawberryEnumDefinition
@@ -301,19 +302,24 @@ def _row_value(row: Any, name: str) -> Any:
     return str(value) if isinstance(value, uuid.UUID) else value
 
 
-def _sort_key(value: Any) -> tuple[bool, Any]:
-    # NULLs sort first on ``asc``, last on ``desc`` (``order_rows`` reverses
-    # the whole key) — matching the default SQLite backend the
-    # project ships, so a computed resource pages NULL-bearing columns like a
-    # model resource. ``value is not None`` makes the None-group ``False`` (so
-    # it sorts before real values on ``asc``); the constant placeholder keeps
-    # None-vs-None from raising on ``None < None`` and never cross-compares
-    # against a real value (the leading flag separates the groups).
-    return (value is not None, "" if value is None else value)
+def _sort_key(
+    value: Any, *, nulls_first: bool, descending: bool
+) -> tuple[bool, Any]:
+    # Python reverses the whole key for descending order, so invert the null
+    # group before sorting. The placeholder never compares with real values.
+    before_reverse = nulls_first != descending
+    null_group = value is not None if before_reverse else value is None
+    return (null_group, "" if value is None else value)
 
 
-def _field_sorter(name: str) -> Callable[[Any], tuple[bool, Any]]:
-    return lambda row: _sort_key(_row_value(row, name))
+def _field_sorter(
+    name: str, *, nulls_first: bool, descending: bool
+) -> Callable[[Any], tuple[bool, Any]]:
+    return lambda row: _sort_key(
+        _row_value(row, name),
+        nulls_first=nulls_first,
+        descending=descending,
+    )
 
 
 def order_rows(
@@ -332,12 +338,19 @@ def order_rows(
     """
     clauses = order_clauses(order_by)
     if id_field is not None:
-        clauses = [*clauses, id_field]
+        clauses = [*clauses, F(id_field).asc(nulls_last=True)]
     result = list(rows)
     for clause in reversed(clauses):
-        descending = clause.startswith("-")
-        field = clause[1:] if descending else clause
-        result.sort(key=_field_sorter(field), reverse=descending)
+        descending = clause.descending
+        field = cast(Any, clause.expression).name
+        result.sort(
+            key=_field_sorter(
+                field,
+                nulls_first=bool(clause.nulls_first),
+                descending=descending,
+            ),
+            reverse=descending,
+        )
     return result
 
 
