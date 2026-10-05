@@ -62,7 +62,11 @@ from .connection import (
     paginate,
 )
 from .filtering import _filter_lookups, filter_queryset, where_to_q
-from .grouping import GroupByExpressionProvider, make_groups_field
+from .grouping import (
+    GroupByExpressionProvider,
+    make_groups_field,
+    validate_group_key_encoders,
+)
 from .inputs import (
     ID_WIRE_NAME as _ID_WIRE_NAME,
 )
@@ -198,7 +202,10 @@ class HasuraResource:
     the count-only ``<Node>Aggregate`` on the row-source path). Groupable
     resources expose both ``groups_root`` and the exact ``groups_count_root``.
     ``insert_argument_names`` and ``update_argument_names`` are tuples of
-    declared root argument names.
+    declared root argument names. ``row_model`` is set only on a groupable
+    row-source resource: the abstract Django model (the aggregate owner's
+    ``make_row_model``) declaring the groupable columns, so consumers can read
+    the same field facts a model resource exposes through its model.
     """
 
     query: type
@@ -240,6 +247,8 @@ class HasuraResource:
     # Appended for positional-constructor compatibility with <= 0.11.x.
     insert_argument_names: tuple[str, ...] = ()
     update_argument_names: tuple[str, ...] = ()
+    # Appended for positional-constructor compatibility with <= 0.13.x.
+    row_model: type[Model] | None = None
 
 
 def _column_python_type(field: Any, *, for_input: bool = False) -> Any:
@@ -743,14 +752,10 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     capped_limit(None, max_rows)
     capped_limit(None, max_groups)
     active_json_paths = dict(json_paths or {})
-    active_encoders = dict(group_key_encoders or {})
+    active_encoders = validate_group_key_encoders(
+        groupable, group_key_encoders
+    )
     active_lookups = _filter_lookups(filter_lookups)
-    for path, encoder in active_encoders.items():
-        if path not in (groupable or []) or not callable(encoder):
-            raise ValueError(
-                f"Group-key encoder {path!r} must name a declared groupable "
-                "path and be callable"
-            )
     aliases: dict[str, str] = {}
     for path in {*aggregatable, *(groupable or []), *active_json_paths}:
         alias = group_by_alias(path, None)

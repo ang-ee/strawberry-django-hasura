@@ -213,6 +213,12 @@ the hook are unchanged.
 not retain rows on a context that may span multiple operations. A consumer
 may memoize within a source whose lifetime is explicitly one operation.
 
+Computed resources group too: `hasura_run_query_resource(groupable=[...])`
+emits the same `<res>_groups` / `<res>_groups_count` surface as a model
+resource and groups the rows its source returns for `where` in memory, with
+`max_groups` and `group_key_encoders` as on `hasura_resource`. See the
+[wire contract](./CONTRACT.md#non-model-resources-hasura_run_query_resource).
+
 ### Upgrading to 0.8
 
 - Aggregate and grouping type prefixes now default to the exact resource name

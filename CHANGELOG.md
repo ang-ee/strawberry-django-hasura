@@ -5,6 +5,40 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] — 2026-10-05
+
+### Added
+
+- `hasura_run_query_resource(groupable=[...])` emits the same
+  `<res>_groups` / `<res>_groups_count` roots, arguments and group types as a
+  model resource. A groupable column is a node field holding a str, int,
+  float, Decimal, bool, date, datetime, time, UUID or enum value. Date and
+  datetime columns accept granularity. Grouping runs in memory over the rows
+  the source returns for the request's `where` (unpaged), through the
+  aggregates library's `compute_row_aggregation`. NULL and `""` stay distinct
+  buckets. Enum columns group into a typed enum key. HAVING, group ordering,
+  `limit` / `offset` and exact group counts follow the model path, and the
+  group `aggregate` is the resource's count-only aggregate type.
+  `max_groups` and `group_key_encoders` work as on `hasura_resource`.
+  Unknown or ungroupable columns fail at construction.
+- `HasuraResource.row_model` exposes a groupable row-source resource's
+  abstract row model, so consumers read the same field facts a model
+  resource offers through its model. The field is appended after the
+  existing fields for positional compatibility.
+
+### Changed
+
+- Model and row-source resources share one grouped-field assembly and one
+  `group_key_encoders` validation. Only execution differs (SQL over the
+  filtered queryset, or in memory over the filtered rows).
+- Grouped requests translate and validate `group_by`, `having` and
+  `order_by` before calling `get_queryset` / `get_aggregate_queryset` and
+  `get_group_by_expressions`. An invalid grouped request now fails without
+  running the scope callbacks; valid requests are unchanged.
+- A row source's `query(..., limit=None)` must return every row matching
+  `where`; grouping depends on it.
+- Requires `strawberry-django-aggregates>=0.14.0`.
+
 ## [0.13.0] — 2026-09-29
 
 ### Added
