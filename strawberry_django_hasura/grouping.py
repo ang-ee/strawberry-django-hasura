@@ -23,6 +23,13 @@ reshape:
   never reshaped* (see ``CONTRACT.md`` — "the aggregate is FREE").
 
 Enable them by building the resource with ``groupable=[...]``.
+
+The field assembly is shared by both resource builders. Only execution
+differs: a model resource groups its filtered queryset in SQL
+(``compute_aggregation`` / ``count_groups``); a ``RowSource`` resource groups
+the rows its source returns for the same ``where`` in memory
+(``compute_row_aggregation`` over the source's row model). Translation, key and
+aggregate shaping, paging caps and encoder validation have one implementation.
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ from __future__ import annotations
 import sys
 import types
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, Protocol
 
 import strawberry
 from django.db.models import QuerySet
@@ -39,6 +46,7 @@ from strawberry_django.resolvers import django_resolver
 from strawberry_django_aggregates import (
     AggregateOp,
     compute_aggregation,
+    compute_row_aggregation,
     shape_aggregate_row,
 )
 
@@ -50,6 +58,186 @@ GroupByExpressionProvider = Callable[
     [strawberry.Info, QuerySet[Any], list[tuple[str, Any]]],
     Mapping[str, Combinable],
 ]
+
+Spec = list[tuple[str, Any]]
+Requested = list[tuple[AggregateOp, str | None]]
+
+
+class GroupExecutor(Protocol):
+    """Runs one translated grouped request against a resource's rows.
+
+    ``rows`` returns ``compute_aggregation``-shaped result rows for one page;
+    ``count`` returns the exact, unpaginated group cardinality for the same
+    ``where`` / ``group_by`` / ``having``. Both receive the already-translated
+    aggregate-owner arguments, so executors never parse wire inputs.
+    """
+
+    def rows(
+        self,
+        info: strawberry.Info,
+        where: Any,
+        spec: Spec,
+        requested: Requested,
+        having: dict[str, Any],
+        order_by: list[tuple[str, str, str | None]],
+        limit: int | None,
+        offset: int,
+    ) -> list[dict[str, Any]]: ...
+
+    def count(
+        self,
+        info: strawberry.Info,
+        where: Any,
+        spec: Spec,
+        requested: Requested,
+        having: dict[str, Any],
+    ) -> int: ...
+
+
+def validate_group_key_encoders(
+    groupable: list[str] | None,
+    group_key_encoders: Mapping[str, Callable[[Any], Any]] | None,
+) -> dict[str, Callable[[Any], Any]]:
+    """Copy and validate ``group_key_encoders`` against ``groupable``.
+
+    Each key must name a declared groupable path and map to a callable. The
+    single check both resource builders run at construction.
+    """
+    encoders = dict(group_key_encoders or {})
+    for path, encoder in encoders.items():
+        if path not in (groupable or []) or not callable(encoder):
+            raise ValueError(
+                f"Group-key encoder {path!r} must name a declared groupable "
+                "path and be callable"
+            )
+    return encoders
+
+
+class _QuerysetGroups:
+    """Group a model resource's filtered queryset in SQL."""
+
+    def __init__(
+        self,
+        *,
+        builder: Any,
+        filtered_queryset: Callable[[strawberry.Info, Any], QuerySet[Any]],
+        get_group_by_expressions: GroupByExpressionProvider | None,
+    ) -> None:
+        self._builder = builder
+        self._filtered = filtered_queryset
+        self._expressions = get_group_by_expressions
+
+    def _source(
+        self, info: strawberry.Info, where: Any, spec: Spec
+    ) -> tuple[QuerySet[Any], Mapping[str, Combinable] | None]:
+        qs = self._filtered(info, where)
+        if self._expressions is None:
+            return qs, None
+        return qs, self._expressions(info, qs, spec)
+
+    def rows(
+        self,
+        info: strawberry.Info,
+        where: Any,
+        spec: Spec,
+        requested: Requested,
+        having: dict[str, Any],
+        order_by: list[tuple[str, str, str | None]],
+        limit: int | None,
+        offset: int,
+    ) -> list[dict[str, Any]]:
+        qs, expressions = self._source(info, where, spec)
+        rows: list[dict[str, Any]] = compute_aggregation(
+            qs,
+            group_by=spec,
+            aggregates=requested,
+            group_by_expressions=expressions,
+            having=having,
+            order_by=order_by,
+            limit=limit,
+            offset=offset,
+            json_paths=self._builder.json_paths,
+        )
+        return rows
+
+    def count(
+        self,
+        info: strawberry.Info,
+        where: Any,
+        spec: Spec,
+        requested: Requested,
+        having: dict[str, Any],
+    ) -> int:
+        qs, expressions = self._source(info, where, spec)
+        return int(
+            self._builder.count_groups(
+                qs,
+                spec,
+                requested,
+                having,
+                group_by_expressions=expressions,
+            )
+        )
+
+
+class _RowSourceGroups:
+    """Group the rows a ``RowSource`` returns for ``where``, in memory.
+
+    ``rows(info, where)`` is the source's full, ``where``-filtered row set
+    (unordered, unpaged); ``row_model`` declares the groupable columns
+    (``strawberry_django_aggregates.make_row_model``). Grouping, HAVING,
+    ordering and paging are the aggregate owner's ``compute_row_aggregation``.
+    """
+
+    def __init__(
+        self,
+        *,
+        rows: Callable[[strawberry.Info, Any], list[Any]],
+        row_model: Any,
+    ) -> None:
+        self._rows = rows
+        self._row_model = row_model
+
+    def rows(
+        self,
+        info: strawberry.Info,
+        where: Any,
+        spec: Spec,
+        requested: Requested,
+        having: dict[str, Any],
+        order_by: list[tuple[str, str, str | None]],
+        limit: int | None,
+        offset: int,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = compute_row_aggregation(
+            self._rows(info, where),
+            model=self._row_model,
+            group_by=spec,
+            aggregates=requested,
+            having=having,
+            order_by=order_by,
+            limit=limit,
+            offset=offset,
+        )
+        return rows
+
+    def count(
+        self,
+        info: strawberry.Info,
+        where: Any,
+        spec: Spec,
+        requested: Requested,
+        having: dict[str, Any],
+    ) -> int:
+        return len(
+            compute_row_aggregation(
+                self._rows(info, where),
+                model=self._row_model,
+                group_by=spec,
+                aggregates=requested,
+                having=having,
+            )
+        )
 
 
 def make_groups_field(
@@ -78,11 +266,62 @@ def make_groups_field(
     ``<res>_groups(group_by, where, having, order_by, limit, offset)`` root
     plus its exact, unpaginated ``<res>_groups_count`` companion.
     """
-    group_key_encoders = dict(group_key_encoders or {})
     filter_lookups = _filter_lookups(filter_lookups)
+
+    def filtered_queryset(info: strawberry.Info, where: Any) -> QuerySet[Any]:
+        qs: QuerySet[Any] = get_queryset(info)
+        if where is not None:
+            qs = filter_queryset(
+                qs,
+                where_to_q(
+                    where,
+                    id_column=id_column,
+                    id_decode=id_decode,
+                    field_decoders=field_decoders,
+                    lookups=filter_lookups,
+                ),
+            )
+        return qs
+
+    return build_groups_fields(
+        builder=builder,
+        built=built,
+        aggregate_type=built.aggregate_type,
+        resource_name=resource_name,
+        filter_type=filter_type,
+        executor=_QuerysetGroups(
+            builder=builder,
+            filtered_queryset=filtered_queryset,
+            get_group_by_expressions=get_group_by_expressions,
+        ),
+        max_groups=max_groups,
+        group_key_encoders=group_key_encoders,
+    )
+
+
+def build_groups_fields(
+    *,
+    builder: Any,
+    built: Any,
+    aggregate_type: type,
+    resource_name: str,
+    filter_type: type,
+    executor: GroupExecutor,
+    max_groups: int | None = None,
+    group_key_encoders: Mapping[str, Callable[[Any], Any]] | None = None,
+) -> tuple[Any, Any, list[type]]:
+    """Assemble ``<res>_groups`` / ``<res>_groups_count`` over an executor.
+
+    The one implementation of the grouped wire surface. ``builder`` /
+    ``built`` provide the typed key, group-by spec, having and group-order
+    types plus the translators and key shaper; ``aggregate_type`` is the
+    resource's own aggregate payload (the same type ``<res>_aggregate``
+    exposes), filled by ``shape_aggregate_row``. ``executor`` runs the
+    translated request (:class:`GroupExecutor`).
+    """
+    group_key_encoders = dict(group_key_encoders or {})
     module = _host_module(resource_name)
     group_key_type = built.group_key_type
-    aggregate_type = built.aggregate_type
     group_by_spec = built.group_by_spec
     having_input = built.having_input
     group_order_input = built.group_order_input
@@ -103,30 +342,6 @@ def make_groups_field(
     )
     setattr(module, f"{resource_name}_group", group_type)
 
-    def filtered_queryset(info: strawberry.Info, where: Any) -> QuerySet[Any]:
-        qs: QuerySet[Any] = get_queryset(info)
-        if where is not None:
-            qs = filter_queryset(
-                qs,
-                where_to_q(
-                    where,
-                    id_column=id_column,
-                    id_decode=id_decode,
-                    field_decoders=field_decoders,
-                    lookups=filter_lookups,
-                ),
-            )
-        return qs
-
-    def group_by_expressions(
-        info: strawberry.Info,
-        qs: QuerySet[Any],
-        spec: list[tuple[str, Any]],
-    ) -> Mapping[str, Combinable] | None:
-        if get_group_by_expressions is None:
-            return None
-        return get_group_by_expressions(info, qs, spec)
-
     def resolve_groups(
         self: Any,
         info: strawberry.Info,
@@ -139,24 +354,21 @@ def make_groups_field(
     ) -> list[Any]:
         del self
         validate_pagination(limit, offset)
-        qs = filtered_queryset(info, where)
-        # Owner-translated: wire inputs → compute_aggregation arguments. The
+        # Owner-translated: wire inputs → aggregate-owner arguments. The
         # adapter never re-implements the spec / granularity / having parsing.
         spec = builder.translate_group_by(group_by)
-        expressions = group_by_expressions(info, qs, spec)
         requested = _requested_group_ops(info, builder.json_paths)
         having_dict = builder.translate_having(having, requested)
         order_terms = builder.translate_order_by(order_by, spec, requested)
-        rows = compute_aggregation(
-            qs,
-            group_by=spec,
-            aggregates=requested,
-            group_by_expressions=expressions,
-            having=having_dict,
-            order_by=order_terms,
-            limit=capped_limit(limit, max_groups),
-            offset=offset or 0,
-            json_paths=builder.json_paths,
+        rows = executor.rows(
+            info,
+            where,
+            spec,
+            requested,
+            having_dict,
+            order_terms,
+            capped_limit(limit, max_groups),
+            offset or 0,
         )
         return [
             group_type(
@@ -196,20 +408,10 @@ def make_groups_field(
         having: Any = None,
     ) -> int:
         del self
-        qs = filtered_queryset(info, where)
         spec = builder.translate_group_by(group_by)
-        expressions = group_by_expressions(info, qs, spec)
-        requested = [(AggregateOp.COUNT, None)]
+        requested: Requested = [(AggregateOp.COUNT, None)]
         having_dict = builder.translate_having(having, requested)
-        return int(
-            builder.count_groups(
-                qs,
-                spec,
-                requested,
-                having_dict,
-                group_by_expressions=expressions,
-            )
-        )
+        return executor.count(info, where, spec, requested, having_dict)
 
     resolve_groups_count.__annotations__ = {
         "self": Any,

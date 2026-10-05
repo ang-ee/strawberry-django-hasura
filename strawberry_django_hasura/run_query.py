@@ -16,6 +16,14 @@ dialect over Python objects*: :func:`where_matches` is the in-memory sibling of
 per-row predicate, not a Django ``Q``), and :func:`order_rows` /
 :func:`apply_in_memory` mirror ordering + paging over a list.
 
+A ``groupable`` resource also emits the model path's ``<res>_groups`` /
+``<res>_groups_count`` roots and types. The groupable node columns become the
+aggregate owner's row model (``make_row_model``), so the typed key, spec,
+having and order types come from the same ``AggregateBuilder``; execution
+groups the rows the source returns for ``where`` with
+``compute_row_aggregation``. The grouped field assembly is shared with the
+model path (``grouping.build_groups_fields``).
+
 ``RowSource.query`` / ``RowSource.count`` are the **pushdown seam**: the
 default :class:`InMemoryRowSource` evaluates everything in Python (right for
 computed, already-materialised rows), while a source backed by a real transport
@@ -28,7 +36,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum
 from typing import Any, Protocol, cast
 
@@ -36,7 +44,9 @@ import strawberry
 from django.db.models import F
 from strawberry import UNSET
 from strawberry.types import get_object_definition
+from strawberry.types.base import StrawberryList, StrawberryOptional
 from strawberry.types.enum import StrawberryEnumDefinition
+from strawberry_django_aggregates import AggregateBuilder, make_row_model
 
 from .comparisons import IDComparison, JSONComparison
 from .connection import capped_limit, validate_pagination
@@ -44,6 +54,11 @@ from .filtering import (
     PORTABLE_LOOKUPS,
     hasura_like_matches,
     validate_comparison_operand,
+)
+from .grouping import (
+    _RowSourceGroups,
+    build_groups_fields,
+    validate_group_key_encoders,
 )
 from .inputs import (
     ID_WIRE_NAME,
@@ -383,6 +398,11 @@ class RowSource(Protocol):
     receive the parsed ``where`` so a transport-backed source can push the
     predicate down (e.g. a foreign daemon, a scoped queryset); the default
     :class:`InMemoryRowSource` evaluates it in Python.
+
+    ``query(..., limit=None)`` MUST return every row matching ``where``: a
+    groupable resource groups exactly those rows, so a source that caps an
+    unlimited page would undercount ``<res>_groups`` and
+    ``<res>_groups_count``.
     """
 
     def query(
@@ -456,22 +476,74 @@ class InMemoryRowSource:
 # --- the builder -------------------------------------------------------------
 
 
-def _node_field_python_types(node: type) -> dict[str, Any]:
-    """Map each node field's python attr name to the scalar it carries.
+def _node_field_types(node: type) -> dict[str, Any]:
+    """Map each node field's python attr name to its strawberry field type.
 
     Keyed by ``python_name`` — the attribute ``where_matches`` / ``order_rows``
     read off a row with ``getattr``, and the name a ``filterable`` /
-    ``sortable`` column refers to — not the wire name. A node field with an
-    explicit camelCase ``strawberry.field(name=...)`` would otherwise be
-    filtered/sorted against the (absent) wire attribute, matching nothing.
+    ``sortable`` / ``groupable`` column refers to — not the wire name. A node
+    field with an explicit camelCase ``strawberry.field(name=...)`` would
+    otherwise be filtered/sorted against the (absent) wire attribute, matching
+    nothing.
     """
     definition = get_object_definition(node)
     if definition is None:
         raise TypeError(f"{node!r} is not a strawberry type")
+    return {field.python_name: field.type for field in definition.fields}
+
+
+def _node_field_python_types(node: type) -> dict[str, Any]:
+    """Map each node field's python attr name to the scalar it carries."""
     return {
-        field.python_name: _python_type_of(field.type)
-        for field in definition.fields
+        name: _python_type_of(field_type)
+        for name, field_type in _node_field_types(node).items()
     }
+
+
+def _group_column_type(field_type: Any) -> Any:
+    """The python column type a groupable node field declares.
+
+    Unlike :func:`_python_type_of`, an enum keeps its python ``Enum`` class so
+    the group key is the aggregate owner's typed enum (as a model ``choices``
+    column is). A list is refused here; other unsupported types are refused
+    by the row model.
+    """
+    if isinstance(field_type, StrawberryOptional):
+        field_type = field_type.of_type
+    if isinstance(field_type, StrawberryList):
+        raise TypeError("a list column has no single group key")
+    if isinstance(field_type, StrawberryEnumDefinition):
+        return field_type.wrapped_cls
+    return field_type
+
+
+def _group_row_model(
+    res: str,
+    prefix: str,
+    field_types: Mapping[str, Any],
+    groupable: Sequence[str],
+) -> Any:
+    """Declare the groupable node columns as the aggregate owner's row model.
+
+    Unsupported column types (lists, JSON, ``ID``, nested objects) fail at
+    construction, naming the resource.
+    """
+    columns: dict[str, Any] = {}
+    for column in groupable:
+        try:
+            columns[column] = _group_column_type(field_types[column])
+        except TypeError as exc:
+            raise TypeError(
+                f"hasura_run_query_resource({res!r}) cannot group by "
+                f"column {column!r}: {exc}"
+            ) from exc
+    try:
+        return make_row_model(prefix, columns)
+    except TypeError as exc:
+        raise TypeError(
+            f"hasura_run_query_resource({res!r}) cannot group by its "
+            f"declared column(s): {exc}"
+        ) from exc
 
 
 def _python_type_of(field_type: Any) -> Any:
@@ -564,6 +636,9 @@ def hasura_run_query_resource(
     id_field: str = ID_WIRE_NAME,
     max_rows: int | None = None,
     aggregate_name: str | None = None,
+    groupable: Sequence[str] | None = None,
+    max_groups: int | None = None,
+    group_key_encoders: Mapping[str, Callable[[Any], Any]] | None = None,
 ) -> HasuraResource:
     """Assemble a read-only Hasura resource over a :class:`RowSource`.
 
@@ -579,15 +654,36 @@ def hasura_run_query_resource(
     overrides the resource-based aggregate type prefix; use it to retain
     a previously published node-based type name.
 
+    ``groupable`` enables the same ``<res>_groups`` / ``<res>_groups_count``
+    roots and types as ``hasura_resource(groupable=...)``. Each entry must be
+    a node field holding a str, int, float, Decimal, bool, date, datetime,
+    time, UUID or enum value (a date/datetime column also accepts
+    granularity). Grouping runs in memory over the rows ``source.query``
+    returns for the request's ``where`` (unpaged; ``max_rows`` does not
+    apply), via the aggregate owner's ``compute_row_aggregation``; the group
+    ``aggregate`` is this resource's count-only aggregate type. ``max_groups``
+    caps the grouped row page and ``group_key_encoders`` maps groupable
+    columns to output codecs, as on the model path. A groupable resource
+    needs a ready Django app registry, and exposes its row model as
+    ``HasuraResource.row_model``.
+
     Returns a :class:`HasuraResource` with an empty mutation holder (read-only)
     whose ``query`` / ``types`` drop into a schema alongside model resources.
     """
     res = name
     capped_limit(None, max_rows)
+    capped_limit(None, max_groups)
+    groupable = list(groupable or [])
+    active_encoders = validate_group_key_encoders(
+        groupable, group_key_encoders
+    )
     module = host_module(res)
+    node_types = _node_field_types(node)
     field_types = _node_field_python_types(node)
     missing = [
-        col for col in (*filterable, *sortable) if col not in field_types
+        col
+        for col in (*filterable, *sortable, *groupable)
+        if col not in field_types
     ]
     if missing:
         raise TypeError(
@@ -614,8 +710,48 @@ def hasura_run_query_resource(
         module,
     )
     order_by_input = build_order_by(res, list(sortable), module)
-    count_type = _count_aggregate_type(aggregate_name or res)
+    aggregate_prefix = aggregate_name or res
+    count_type = _count_aggregate_type(aggregate_prefix)
     container = _aggregate_container(res, node, source, count_type, max_rows)
+
+    # --- optional grouped surface (shared assembly with the model path) -----
+    # The builder supplies the typed key / spec / having / order types and the
+    # translators; ``count_type`` stays the one aggregate type this resource
+    # exposes, as the free aggregate is on the model path.
+    groups_field: Any = None
+    groups_count_field: Any = None
+    groups_types: list[type] = []
+    row_model: Any = None
+    if groupable:
+        row_model = _group_row_model(
+            res, aggregate_prefix, node_types, groupable
+        )
+        group_builder = AggregateBuilder(
+            model=row_model,
+            name_prefix=aggregate_prefix,
+            aggregate_fields=[],
+            group_by_fields=groupable,
+        )
+
+        def group_rows(info: strawberry.Info, where: Any) -> list[Any]:
+            return source.query(
+                info, where=where, order_by=None, limit=None, offset=None
+            )
+
+        groups_field, groups_count_field, groups_types = build_groups_fields(
+            builder=group_builder,
+            built=group_builder.build(),
+            aggregate_type=count_type,
+            resource_name=res,
+            filter_type=bool_exp,
+            executor=_RowSourceGroups(rows=group_rows, row_model=row_model),
+            max_groups=max_groups,
+            group_key_encoders=active_encoders,
+        )
+        # As on the model path: the query walk reaches the group container
+        # and key, but not the having / order_by INPUT types.
+        for grouped in groups_types:
+            pin_snake_wire_names(grouped, recursive=True)
 
     def resolve_list(
         self: Any,
@@ -678,6 +814,10 @@ def hasura_run_query_resource(
     list_root = res
     aggregate_root = f"{res}_aggregate"
     detail_root = f"{res}_by_pk"
+    groups_root = f"{res}_groups" if groups_field is not None else None
+    groups_count_root = (
+        f"{res}_groups_count" if groups_count_field is not None else None
+    )
     query_fields = {
         list_root: strawberry.field(resolver=resolve_list, name=list_root),
         aggregate_root: strawberry.field(
@@ -687,23 +827,40 @@ def hasura_run_query_resource(
             resolver=resolve_by_pk, name=detail_root
         ),
     }
+    if groups_root is not None and groups_count_root is not None:
+        query_fields[groups_root] = groups_field
+        query_fields[groups_count_root] = groups_count_field
     query = strawberry.type(type(f"{res}__query", (), query_fields))
     pin_snake_wire_names(query)
     # Read-only: an empty mutation holder keeps the bundle shape uniform with
     # the model path's all-ops-disabled resource (it merges to nothing; an
     # addon serving the resource read-only simply does not register it).
     mutation = strawberry.type(type(f"{res}__mutation", (), {}))
+    group_types: list[type | None] = (
+        list(groups_types) if groups_types else [None] * 5
+    )
+    group_type, group_key_type, group_by_spec_type, having_type, order_type = (
+        group_types
+    )
     return HasuraResource(
         query=query,
         mutation=mutation,
-        types=[container, count_type, bool_exp, order_by_input],
+        types=[container, count_type, bool_exp, order_by_input, *groups_types],
         name=res,
         node_type=node,
         filter_type=bool_exp,
         order_by_type=order_by_input,
         aggregate_container_type=container,
         aggregate_type=count_type,
+        group_type=group_type,
+        group_key_type=group_key_type,
+        group_by_spec_type=group_by_spec_type,
+        group_order_type=order_type,
+        having_type=having_type,
         list_root=list_root,
         aggregate_root=aggregate_root,
         detail_root=detail_root,
+        groups_root=groups_root,
+        groups_count_root=groups_count_root,
+        row_model=row_model,
     )

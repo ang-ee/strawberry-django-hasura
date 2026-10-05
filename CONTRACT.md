@@ -306,6 +306,40 @@ each query/count resolution. A caller can memoize inside an explicitly
 operation-scoped source. `max_rows` and `aggregate_name` are supported by this
 builder as well.
 
+**Grouping (opt-in).** `groupable=[...]` emits the same `<res>_groups` /
+`<res>_groups_count` roots, arguments and types as a model resource (see
+[Grouping](#grouping--ndc-preview-not-stock-refinedevhasura)), so a client
+drives both through one query shape. Each groupable entry must be a node field holding a
+str, int, float, Decimal, bool, date, datetime, time, UUID or enum value;
+lists, JSON, `ID` and unknown fields fail at construction. The groupable
+columns become the aggregates library's row model (`make_row_model`, exposed
+as `HasuraResource.row_model`), so `<res>GroupKey` / `GroupBySpec` /
+`Having` / `GroupOrder` come from the same `AggregateBuilder` as on the model
+path, and the group `aggregate` is this resource's count-only aggregate type.
+
+Execution reads every row `source.query` returns for the request's `where`
+(no `order_by`, `limit` or `offset`; `max_rows` does not apply) and groups
+them with the aggregates library's `compute_row_aggregation`. A source must
+therefore return every matching row when `limit` is `None`; a source that
+caps an unlimited page undercounts groups. Execution differs from the SQL path
+in three documented ways: strings order by Python code point (not a database
+collation), default NULL placement follows Postgres (`asc` last, `desc` first)
+on every backend, and timezone conversion follows Django's `USE_TZ` reading.
+
+- NULL and `""` are distinct buckets; an enum column groups by its stored
+  value into a typed enum key named after the enum's members.
+- Date and datetime columns accept granularity. With `USE_TZ`, datetimes
+  convert to the server `TIME_ZONE` before truncating, and naive ones are
+  read in the default timezone, as Django reads a `DateTimeField`. Time-of-day
+  granularity on a date column fails.
+- `having` filters on `count`; `order_by` takes `count` or a group key;
+  `limit` / `offset` page the groups, capped by `max_groups`. Groups without
+  `order_by` come back sorted by key, NULLs last.
+- `<res>_groups_count` is the exact number of groups after `having`.
+- `group_key_encoders` transform key output only, as on the model path.
+
+A groupable resource needs a ready Django app registry at construction.
+
 ## Write and execution boundaries
 
 Non-editable fields, including forward M2M relations, are excluded from
@@ -424,6 +458,9 @@ type notes_group {
   `hasura_resource(max_groups=…)` to cap an unbounded high-cardinality grouping
   (default uncapped). Reads run on the caller's scoped queryset
   (permission-naive), with the Hasura `where` applied before grouping.
+- **Row sources.** `hasura_run_query_resource(groupable=...)` emits this same
+  surface over computed rows, grouped in memory (see
+  [Non-model resources](#non-model-resources-hasura_run_query_resource)).
 - **Exact cardinality.** `<res>_groups_count` shares `group_by`, `where`, and
   `having` semantics with `<res>_groups`, but deliberately has no ordering,
   limit, or offset. It delegates to the aggregation owner's database-side
