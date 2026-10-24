@@ -44,7 +44,7 @@ from typing import Any, Protocol, cast
 
 import strawberry
 from django.core.exceptions import FieldDoesNotExist
-from django.db.models import Field, Model, QuerySet
+from django.db.models import Field, Model, Q, QuerySet
 from strawberry import UNSET
 from strawberry_django.fields.types import (
     field_type_map,
@@ -628,6 +628,8 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     delete: bool = True,
     field_id_decode: Mapping[str, Callable[[Any], Any]] | None = None,
     get_queryset: Callable[[strawberry.Info], QuerySet[Any]],
+    prepare_filter_queryset: Callable[[QuerySet[Any], Q], QuerySet[Any]]
+    | None = None,
     get_aggregate_queryset: (
         Callable[[strawberry.Info], QuerySet[Any]] | None
     ) = None,
@@ -655,6 +657,11 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     must return a per-row Django expression. The source keeps ownership of
     authorization and row cardinality. Alias names cannot collide with native
     model fields or the public id.
+    ``prepare_filter_queryset(queryset, predicate)`` may install lazy filter
+    expressions on the already-scoped queryset before applying the translated
+    Django ``Q``. It serves lists, aggregate math/nodes and grouped
+    rows/counts,
+    including empty predicates. The callback must preserve source row scope.
     ``groupable`` enables the optional NDC-shaped
     ``<res>_groups`` row root and exact ``<res>_groups_count`` companion;
     ``max_groups`` caps only the row root's offset page (a high-cardinality
@@ -928,6 +935,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
                 field_decoders=field_id_decode,
                 lookups=active_lookups,
             ),
+            prepare_queryset=prepare_filter_queryset,
         )
 
     def filtered(info: strawberry.Info, where: Any) -> QuerySet[Any]:
@@ -979,6 +987,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             resource_name=res,
             filter_type=bool_exp,
             get_queryset=aggregate_get_queryset,
+            prepare_filter_queryset=prepare_filter_queryset,
             id_decode=id_decode,
             id_column=id_column,
             field_decoders=field_id_decode,

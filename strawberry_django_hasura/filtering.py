@@ -261,14 +261,25 @@ def validate_comparison_operand(attr: str, value: Any) -> None:
         )
 
 
-def filter_queryset(queryset: QuerySet[Any], predicate: Q) -> QuerySet[Any]:
+def filter_queryset(
+    queryset: QuerySet[Any],
+    predicate: Q,
+    *,
+    prepare_queryset: Callable[[QuerySet[Any], Q], QuerySet[Any]]
+    | None = None,
+) -> QuerySet[Any]:
     """Apply membership predicates without multiplying parent identities.
 
     A direct to-many comparison can match several related rows. Compose a
     primary-key subquery in that case; the outer queryset retains its scope,
     annotations and optimizer hints while SQL membership returns each parent
     once. Scalar/to-one predicates keep the ordinary filter path.
+    ``prepare_queryset`` receives the scoped queryset and translated predicate
+    once before filtering, including an empty predicate. It may install lazy
+    aliases and must preserve the supplied source scope.
     """
+    if prepare_queryset is not None:
+        queryset = prepare_queryset(queryset, predicate)
     matched = queryset.filter(predicate)
     if not _has_to_many_lookup(queryset.model, predicate):
         return matched

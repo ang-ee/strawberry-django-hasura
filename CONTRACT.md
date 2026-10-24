@@ -506,3 +506,15 @@ The lower-level build_aggregate_type and make_aggregate_resolver accept
 json_paths; pass the same mapping to both. The where_to_q and comparison_to_q
 functions accept the corresponding backend extension as lookups. Existing
 resources without these declarations keep their SDL and behavior.
+
+### Lazy filter queryset preparation
+
+`hasura_resource(prepare_filter_queryset=callback)` optionally calls
+`callback(scoped_queryset, translated_q)` before applying each filter. This
+allows installing Django aliases only when the predicate references them. The
+callback returns a queryset preserving the supplied source scope; it receives
+Django's `Q`, including nested boolean conditions and decoded variable values.
+Lists, aggregate math, aggregate nodes, grouped rows and group counts share
+this boundary, including an empty `Q` when `where` is omitted. Preparation runs
+once per filtered queryset, before membership deduplication and pagination.
+With no callback, filtering behavior is unchanged.

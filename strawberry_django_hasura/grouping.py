@@ -40,7 +40,7 @@ from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 import strawberry
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 from django.db.models.expressions import Combinable
 from strawberry_django.resolvers import django_resolver
 from strawberry_django_aggregates import (
@@ -247,6 +247,8 @@ def make_groups_field(
     resource_name: str,
     filter_type: type,
     get_queryset: Any,
+    prepare_filter_queryset: Callable[[QuerySet[Any], Q], QuerySet[Any]]
+    | None = None,
     id_decode: Any = None,
     id_column: str = "pk",
     field_decoders: Any = None,
@@ -270,18 +272,17 @@ def make_groups_field(
 
     def filtered_queryset(info: strawberry.Info, where: Any) -> QuerySet[Any]:
         qs: QuerySet[Any] = get_queryset(info)
-        if where is not None:
-            qs = filter_queryset(
-                qs,
-                where_to_q(
-                    where,
-                    id_column=id_column,
-                    id_decode=id_decode,
-                    field_decoders=field_decoders,
-                    lookups=filter_lookups,
-                ),
-            )
-        return qs
+        return filter_queryset(
+            qs,
+            where_to_q(
+                where,
+                id_column=id_column,
+                id_decode=id_decode,
+                field_decoders=field_decoders,
+                lookups=filter_lookups,
+            ),
+            prepare_queryset=prepare_filter_queryset,
+        )
 
     return build_groups_fields(
         builder=builder,
