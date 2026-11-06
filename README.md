@@ -209,6 +209,18 @@ override only selected forward to-one scalar or date paths. Permissions and
 expression semantics remain the caller's responsibility. Resources without
 the hook are unchanged.
 
+To carry per-group data in the same response (for example each group's first
+rows), declare `group_fields={"rows": GroupField(type=..., resolve=...,
+arguments={"limit": int})}`. The adapter adds `<res>_group.rows(limit: Int!)`
+and fills it for a whole page of groups with one `resolve(batch)` call, where
+`batch` is a `GroupFieldBatch(info, groups, where, group_by, arguments)` with
+`group_by` the translated `[(path, granularity)]` spec; `resolve` returns one
+value per group in order and reads through its own scoped source, and its
+outcome (an error included) is kept for the whole page. `arguments` may also be
+a callable receiving the resource's own inputs (`GroupFieldInputs(order_by)`),
+so a field can take the list root's ordering. Resources without
+`group_fields` are unchanged.
+
 `InMemoryRowSource` calls its source for each list/count resolution and does
 not retain rows on a context that may span multiple operations. A consumer
 may memoize within a source whose lifetime is explicitly one operation.
