@@ -471,6 +471,26 @@ type notes_group {
   queryset feed grouped rows and exact counts; the aggregate owner retains
   validation, aliases, HAVING, ordering, and paging. Expression authorization
   remains caller-owned.
+- **Caller group fields (opt-in, additive).** `group_fields={name:
+  GroupField(type, resolve, arguments={...}, defaults={...})}` adds
+  `<res>_group.<name>(<arguments>): <type>` on both resource builders.
+  `arguments` may instead be a callable receiving `GroupFieldInputs(order_by)`,
+  the resource's own `<res>_order_by`, so a field can take the ordering its
+  list root takes. The first group of a page that resolves the field calls
+  `resolve` once with a `GroupFieldBatch(info, groups, where, group_by,
+  arguments)`, where `group_by` is the translated `[(path, granularity)]` the
+  groups were computed with, and must get one value per group, in order; every
+  other group of that page reads its value. The outcome is kept either way: a
+  raised error or a wrong value count is re-raised for every group of the page
+  without calling `resolve` again. Each selected response name (alias) is one
+  batch, so two aliases with different arguments are two batches, and an
+  unselected field costs nothing. Field and argument wire names are the
+  declared names verbatim; argument names, annotations and `defaults` are
+  validated at build like caller-declared mutation arguments. The field's
+  return type stays caller-owned (the group container is not snake-pinned
+  through it). The adapter stays permission-naive: the callback reads through
+  its own scoped source. `key` and `aggregate` are reserved. Without
+  `group_fields` the SDL is unchanged.
 - **Preview:** the DDN GraphQL `group_by` SDL is unpublished (Hasura
   `graphql-engine#10786`), so these field/argument names may change to track it.
   The stock list / aggregate / CRUD SDL above is unaffected (grouping is purely

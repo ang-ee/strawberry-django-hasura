@@ -56,6 +56,7 @@ from .filtering import (
     validate_comparison_operand,
 )
 from .grouping import (
+    GroupField,
     _RowSourceGroups,
     build_groups_fields,
     validate_group_key_encoders,
@@ -639,6 +640,7 @@ def hasura_run_query_resource(
     groupable: Sequence[str] | None = None,
     max_groups: int | None = None,
     group_key_encoders: Mapping[str, Callable[[Any], Any]] | None = None,
+    group_fields: Mapping[str, GroupField] | None = None,
 ) -> HasuraResource:
     """Assemble a read-only Hasura resource over a :class:`RowSource`.
 
@@ -662,8 +664,9 @@ def hasura_run_query_resource(
     returns for the request's ``where`` (unpaged; ``max_rows`` does not
     apply), via the aggregate owner's ``compute_row_aggregation``; the group
     ``aggregate`` is this resource's count-only aggregate type. ``max_groups``
-    caps the grouped row page and ``group_key_encoders`` maps groupable
-    columns to output codecs, as on the model path. A groupable resource
+    caps the grouped row page, ``group_key_encoders`` maps groupable
+    columns to output codecs and ``group_fields`` declares extra group
+    fields filled per page, as on the model path. A groupable resource
     needs a ready Django app registry, and exposes its row model as
     ``HasuraResource.row_model``.
 
@@ -747,11 +750,9 @@ def hasura_run_query_resource(
             executor=_RowSourceGroups(rows=group_rows, row_model=row_model),
             max_groups=max_groups,
             group_key_encoders=active_encoders,
+            group_fields=group_fields,
+            order_by_type=order_by_input,
         )
-        # As on the model path: the query walk reaches the group container
-        # and key, but not the having / order_by INPUT types.
-        for grouped in groups_types:
-            pin_snake_wire_names(grouped, recursive=True)
 
     def resolve_list(
         self: Any,

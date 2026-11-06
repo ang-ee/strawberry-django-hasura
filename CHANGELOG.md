@@ -5,6 +5,41 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] — 2026-11-06
+
+### Added
+
+- `hasura_resource(prepare_filter_queryset=callback)` calls
+  `callback(scoped_queryset, translated_q)` before applying each filter, so a
+  consumer installs Django aliases only when the predicate references them.
+  Lists, aggregate math and nodes, grouped rows and group counts share the
+  boundary (an empty `Q` when `where` is omitted); without a callback,
+  filtering is unchanged.
+- `group_fields` on `hasura_resource` and `hasura_run_query_resource`
+  declares extra `<res>_group` fields (`GroupField`), each filled for a whole
+  groups page by one batch callback that receives a `GroupFieldBatch`
+  (`info`, the page's `groups`, the root's `where`, the translated
+  `group_by` spec `[(path, granularity)]`, and the field's `arguments`) and
+  returns one value per group. A field's `arguments` may be a callable
+  receiving `GroupFieldInputs` (the resource's own `<res>_order_by`). One
+  batch runs per page and selected response name, its outcome (values, a
+  raised error or a wrong value count) is kept for the whole page, and an
+  unselected field costs nothing. Field and argument wire names are the
+  declared names; `key` and `aggregate` are reserved. Without `group_fields`
+  the schema is unchanged.
+
+### Changed
+
+- Caller-declared root mutation arguments (`insert_arguments` /
+  `update_arguments`) and group field arguments share one validation: a
+  keyword, a resolver parameter (`self` / `root` / `info`), a GraphQL `__`
+  name, a string or `None` annotation, or a `defaults` key naming no argument
+  fails at build with `TypeError`.
+- The generated `<res>_group` types are snake-pinned once by the shared
+  groups builder; the container is pinned without descending into its field
+  types, so a caller-declared group field may return a caller-owned node type
+  that keeps its own names. The key and aggregate types are pinned as before.
+
 ## [0.14.0] — 2026-10-05
 
 ### Added

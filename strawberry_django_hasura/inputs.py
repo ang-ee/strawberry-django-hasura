@@ -20,7 +20,10 @@ import decimal
 import sys
 import types
 import uuid
+from collections.abc import Collection, Mapping
+from inspect import Parameter
 from itertools import count
+from keyword import iskeyword
 from typing import Any, cast
 
 import strawberry
@@ -226,3 +229,56 @@ def build_order_by(
         module=module,
         defaults=dict.fromkeys(sortable, UNSET),
     )
+
+
+_RESOLVER_PARAMETERS = frozenset({"self", "root", "info"})
+
+
+def caller_parameters(
+    arguments: Mapping[str, Any],
+    *,
+    surface: str,
+    reserved: Collection[str] = (),
+    defaults: Mapping[str, Any] | None = None,
+    optional: bool = False,
+) -> list[Parameter]:
+    """Validate caller-declared GraphQL arguments as keyword-only parameters.
+
+    A name must be a Python identifier that is not a keyword, a resolver
+    parameter (``self`` / ``root`` / ``info``), a GraphQL-reserved ``__``
+    name or one of ``reserved``. An annotation must be a type, not a string
+    annotation or ``None``. Every ``defaults`` key must name an argument.
+    ``optional`` makes each argument nullable with a ``None`` default, as
+    caller-declared root mutation arguments are; otherwise an argument keeps
+    its annotation and takes its default from ``defaults`` (else required).
+    """
+    defaults = dict(defaults or {})
+    for name, annotation in arguments.items():
+        if (
+            not isinstance(name, str)
+            or not name.isidentifier()
+            or iskeyword(name)
+            or name.startswith("__")
+            or name in _RESOLVER_PARAMETERS
+            or name in reserved
+        ):
+            raise TypeError(
+                f"{surface} name {name!r} is an invalid or reserved Python "
+                "parameter name"
+            )
+        if isinstance(annotation, str) or annotation is None:
+            raise TypeError(
+                f"{surface} type for {name!r} must be an input type, not a "
+                "string annotation or None"
+            )
+    if stray := sorted(defaults.keys() - arguments.keys()):
+        raise TypeError(f"{surface} defaults name no argument: {stray}")
+    return [
+        Parameter(
+            name,
+            Parameter.KEYWORD_ONLY,
+            annotation=annotation | None if optional else annotation,
+            default=None if optional else defaults.get(name, Parameter.empty),
+        )
+        for name, annotation in arguments.items()
+    ]

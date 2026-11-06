@@ -18,7 +18,12 @@ from __future__ import annotations
 from .aggregation import build_aggregate_type, make_aggregate_resolver
 from .connection import make_aggregate_container, paginate
 from .filtering import comparison_to_q, where_to_q
-from .grouping import GroupByExpressionProvider
+from .grouping import (
+    GroupByExpressionProvider,
+    GroupField,
+    GroupFieldBatch,
+    GroupFieldInputs,
+)
 from .mutations import input_to_dict
 from .naming import SnakeNameConverter, hasura_config
 from .ordering import (
@@ -47,6 +52,9 @@ from .run_query import (
 __all__ = [
     "FilterablePathError",
     "GroupByExpressionProvider",
+    "GroupField",
+    "GroupFieldBatch",
+    "GroupFieldInputs",
     "HasuraResource",
     "InMemoryRowSource",
     "NestedInsert",

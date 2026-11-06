@@ -39,7 +39,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from inspect import Parameter, signature
-from keyword import iskeyword
 from typing import Any, Protocol, cast
 
 import strawberry
@@ -64,6 +63,7 @@ from .connection import (
 from .filtering import _filter_lookups, filter_queryset, where_to_q
 from .grouping import (
     GroupByExpressionProvider,
+    GroupField,
     make_groups_field,
     validate_group_key_encoders,
 )
@@ -73,6 +73,7 @@ from .inputs import (
 from .inputs import (
     build_bool_exp,
     build_order_by,
+    caller_parameters,
     comparison_for_python_type,
 )
 from .inputs import (
@@ -582,23 +583,19 @@ def _child_relation(model: type[Model], relation: str) -> Any:
 
 
 def _mutation_with_arguments(
-    resolver: Callable[..., Any], *, name: str, arguments: Mapping[str, Any]
+    resolver: Callable[..., Any],
+    *,
+    name: str,
+    parameters: Sequence[Parameter],
 ) -> Any:
-    """Compose Strawberry's optional arguments with a runtime resolver."""
+    """Compose validated caller parameters with a runtime resolver."""
     sig = signature(resolver)
-    parameters = [
+    own = [
         p for p in sig.parameters.values() if p.kind != Parameter.VAR_KEYWORD
     ]
-    parameters += [
-        Parameter(
-            argument_name,
-            kind=Parameter.KEYWORD_ONLY,
-            default=None,
-            annotation=argument_type | None,
-        )
-        for argument_name, argument_type in arguments.items()
-    ]
-    cast(Any, resolver).__signature__ = sig.replace(parameters=parameters)
+    cast(Any, resolver).__signature__ = sig.replace(
+        parameters=[*own, *parameters]
+    )
     return strawberry.mutation(resolver=django_resolver(resolver), name=name)
 
 
@@ -616,6 +613,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     json_paths: Mapping[str, str] | None = None,
     group_key_encoders: Mapping[str, Callable[[Any], Any]] | None = None,
     get_group_by_expressions: GroupByExpressionProvider | None = None,
+    group_fields: Mapping[str, GroupField] | None = None,
     filter_lookups: Mapping[str, tuple[str, bool]] | None = None,
     max_groups: int | None = None,
     max_rows: int | None = None,
@@ -671,7 +669,9 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     translated selected axis and may supply ORM expressions for selected
     forward to-one scalar or date group paths. The same hook serves grouped
     rows and exact group counts; authorization inside an expression remains
-    the caller's responsibility.
+    the caller's responsibility. ``group_fields`` declares extra
+    ``<res>_group`` fields, each filled for a whole page of groups by one
+    batch callback (:class:`~strawberry_django_hasura.GroupField`).
     ``max_rows`` caps list and aggregate-node pages while keeping aggregate
     math unpaged. ``aggregate_name`` overrides the resource-stem prefix used
     for native aggregate and grouping types; choose a unique prefix in the
@@ -713,6 +713,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
     res = name or model.__name__.lower()
     insert_arguments = dict(insert_arguments or {})
     update_arguments = dict(update_arguments or {})
+    caller_arguments: dict[str, list[Parameter]] = {"insert": [], "update": []}
     for operation, method, enabled, arguments in (
         ("insert", "create", insert, insert_arguments),
         ("update", "update", update, update_arguments),
@@ -721,23 +722,12 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             continue
         if not enabled:
             raise TypeError(f"{operation}_arguments requires {operation}=True")
-        for arg_name, argument_type in arguments.items():
-            if (
-                not isinstance(arg_name, str)
-                or not arg_name.isidentifier()
-                or iskeyword(arg_name)
-                or arg_name
-                in {"object", "pk_columns", "_set", "self", "root", "info"}
-            ):
-                raise TypeError(
-                    f"{operation}_arguments name {arg_name!r} is an "
-                    "invalid or reserved Python parameter name"
-                )
-            if isinstance(argument_type, str) or argument_type is None:
-                raise TypeError(
-                    f"{operation}_arguments type for {arg_name!r} "
-                    "must be an input type, not a string annotation or None"
-                )
+        caller_arguments[operation] = caller_parameters(
+            arguments,
+            surface=f"{operation}_arguments",
+            reserved={"object", "pk_columns", "_set"},
+            optional=True,
+        )
         try:
             params = signature(
                 getattr(write_backend, method)
@@ -995,12 +985,9 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
             group_key_encoders=active_encoders,
             filter_lookups=active_lookups,
             get_group_by_expressions=get_group_by_expressions,
+            group_fields=group_fields,
+            order_by_type=order_by_input,
         )
-        # Pin snake_case on the generated group types — the query walk reaches
-        # the group container + key (a return type) but not the ``having`` /
-        # ``order_by`` INPUT types (e.g. ``count_gt`` would camelCase).
-        for grouped in groups_types:
-            _pin_snake_wire_names(grouped, recursive=True)
         group_type = groups_types[0]
         group_key_type = cast("type", agg_built.group_key_type)
         group_by_spec_type = groups_types[2]
@@ -1133,7 +1120,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         mutation_fields[insert_one_root] = _mutation_with_arguments(
             resolve_insert,
             name=insert_one_root,
-            arguments=insert_arguments,
+            parameters=caller_arguments["insert"],
         )
     if "update" in operations:
         assert pk_columns_input is not None
@@ -1161,7 +1148,7 @@ def hasura_resource(  # noqa: PLR0913 — declarative builder: one knob per face
         mutation_fields[update_by_pk_root] = _mutation_with_arguments(
             resolve_update,
             name=update_by_pk_root,
-            arguments=update_arguments,
+            parameters=caller_arguments["update"],
         )
     if "delete" in operations:
         assert delete_by_pk_root is not None
